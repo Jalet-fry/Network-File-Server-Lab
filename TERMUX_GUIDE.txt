@@ -1,0 +1,35 @@
+=== ИНСТРУКЦИЯ ПО ЗАПУСКУ В TERMUX ===
+
+1. ПОДГОТОВКА ОКРУЖЕНИЯ
+Выполните эти команды сразу после клонирования:
+pkg update && pkg upgrade
+pkg install openjdk-17 dos2unix git
+
+2. ИСПРАВЛЕНИЕ ОКОНЧАНИЙ СТРОК (ВАЖНО!)
+Если проект создавался на Windows, скрипты могут не запуститься из-за CRLF.
+Выполните:
+dos2unix gradlew run.sh BUILD_PROJECT.sh
+chmod +x gradlew run.sh BUILD_PROJECT.sh
+
+3. СБОРКА ПРОЕКТА
+Соберите приложение с помощью Gradle Wrapper:
+./gradlew installDist
+
+4. ЗАПУСК (ЛР №4 - ВАРИАНТ 5)
+Запуск сервера с динамическим пулом потоков:
+./run.sh 3 1
+
+Где:
+ 3 - Режим сервера (Thread Pool / Lab 4)
+ 1 - Протокол TCP
+
+5. ПРОВЕРКА РАБОТЫ
+Вы можете подключиться к серверу из другого окна Termux:
+pkg install telnet
+telnet localhost 9999
+
+=== СОВЕТЫ ПО GIT ===
+Если нужно сбросить лишние файлы и оставить только чистый код:
+git reset
+git add .
+git commit -m "Initial clean commit"
