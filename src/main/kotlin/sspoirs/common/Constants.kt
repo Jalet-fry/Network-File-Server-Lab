@@ -3,7 +3,7 @@ package sspoirs.common
 import java.io.File
 
 object Constants {
-    const val DEFAULT_PORT = 9999
+    const val DEFAULT_PORT = 8888
     const val DEFAULT_HOST = "localhost"
     const val LINE_SEPARATOR = "\r\n"
     const val BUFFER_SIZE = 8192
