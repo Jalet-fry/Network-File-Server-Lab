@@ -1,13 +1,10 @@
 package sspoirs.lr2
 
-import org.jline.reader.LineReaderBuilder
-import org.jline.reader.impl.completer.AggregateCompleter
-import org.jline.reader.impl.completer.StringsCompleter
-import org.jline.terminal.TerminalBuilder
 import sspoirs.common.*
 import java.io.*
 import java.net.DatagramSocket
 import java.net.InetAddress
+import java.util.Scanner
 
 class UdpClient(private val host: String, private val port: Int) {
     private val socket = DatagramSocket()
@@ -19,17 +16,11 @@ class UdpClient(private val host: String, private val port: Int) {
         println("UDP Client started. Connected to $host:$port (Reliable Mode)")
         updateServerFiles()
 
-        val terminal = TerminalBuilder.builder().system(true).build()
-        val lineReader = LineReaderBuilder.builder()
-            .terminal(terminal)
-            .completer(AggregateCompleter(
-                StringsCompleter(Command.allCommands() + listOf("ls", "exit", "quit")),
-                StringsCompleter { serverFiles }
-            ))
-            .build()
-
+        val scanner = Scanner(System.`in`)
         while (true) {
-            val line = try { lineReader.readLine("UDP > ")?.trim() } catch (e: Exception) { null } ?: break
+            print("UDP > ")
+            if (!scanner.hasNextLine()) break
+            val line = scanner.nextLine().trim()
             if (line.isEmpty()) continue
             if (handleCommand(line)) break
         }

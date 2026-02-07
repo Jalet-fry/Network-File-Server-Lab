@@ -29,7 +29,19 @@ pkg install telnet
 telnet localhost 9999
 
 === СОВЕТЫ ПО GIT ===
-Если нужно сбросить лишние файлы и оставить только чистый код:
-git reset
-git add .
-git commit -m "Initial clean commit"
+
+Как полностью очистить проект и синхронизироваться с облаком:
+1. git reset --hard HEAD      (удалить изменения в файлах)
+2. git clean -fd              (удалить новые/лишние файлы)
+3. git fetch origin           (обновить список веток с сервера)
+4. git checkout ИМЯ_ВЕТКИ     (перейти на нужную ветку)
+5. git pull origin ИМЯ_ВЕТКИ  (скачать свежий код для ветки)
+
+Как перенести коммиты из одной ветки в другую:
+1. git checkout main                   (перейти в ветку, куда случайно сделали коммит)
+2. git checkout -b temp-branch          (создать временную ветку из текущего состояния)
+3. git checkout main                   (вернуться на main)
+4. git reset --hard HEAD~2             (откатить main на 2 коммита назад)
+5. git push origin main --force        (принудительно обновить main в облаке)
+6. git checkout termux-fix             (перейти в целевую ветку)
+7. git merge temp-branch               (слить изменения из временной ветки)

@@ -1,14 +1,11 @@
 package sspoirs.lr1
 
-import org.jline.reader.LineReaderBuilder
-import org.jline.reader.impl.completer.AggregateCompleter
-import org.jline.reader.impl.completer.StringsCompleter
-import org.jline.terminal.TerminalBuilder
 import sspoirs.common.Command
 import sspoirs.common.Constants
 import sspoirs.common.NetworkUtils
 import java.io.*
 import java.net.Socket
+import java.util.Scanner
 
 class SimpleClient(private val host: String, private val port: Int) {
     private var socket: Socket? = null
@@ -19,22 +16,13 @@ class SimpleClient(private val host: String, private val port: Int) {
     fun start() {
         if (!connect()) return
 
-        val terminal = try { 
-            TerminalBuilder.builder().system(true).build() 
-        } catch (e: Exception) {
-            println("\n[WARN] System terminal not available, using dumb terminal. Autocomplete may not work.")
-            TerminalBuilder.builder().dumb(true).build()
-        }
-
-        val lineReader = LineReaderBuilder.builder()
-            .terminal(terminal)
-            .completer(buildCompleter())
-            .build()
-
+        val scanner = Scanner(System.`in`)
         println("\nCommands: LS, DOWNLOAD, UPLOAD, TIME, ECHO, EXIT. Type '?' for help.")
 
         while (true) {
-            val line = try { lineReader.readLine("TCP > ")?.trim() } catch (e: Exception) { null } ?: break
+            print("TCP > ")
+            if (!scanner.hasNextLine()) break
+            val line = scanner.nextLine().trim()
             if (line.isEmpty()) continue
             if (line == "?") {
                 printHelp()
@@ -52,13 +40,7 @@ class SimpleClient(private val host: String, private val port: Int) {
         serverFiles.forEach { println(" - $it") }
     }
 
-    private fun buildCompleter() = AggregateCompleter(
-        StringsCompleter(Command.allCommands().map { it.lowercase() } + Command.allCommands()),
-        StringsCompleter(serverFiles)
-    )
-
     private fun connect(): Boolean {
-        // ... (rest of the code is unchanged)
         return try {
             socket = Socket(host, port).apply { keepAlive = true }
             inputStream = BufferedInputStream(socket!!.getInputStream())
