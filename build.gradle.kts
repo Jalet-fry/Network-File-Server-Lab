@@ -1,6 +1,6 @@
 plugins {
     kotlin("jvm") version "2.0.20"
-    application // Добавляем плагин для запуска
+    application
 }
 
 group = "org.example"
@@ -11,14 +11,12 @@ repositories {
 }
 
 application {
-    mainClass.set("sspoirs.MainKt") // Указываем входную точку
+    mainClass.set("sspoirs.MainKt")
 }
 
 dependencies {
-    implementation("org.jline:jline:3.26.3")
-    implementation("org.fusesource.jansi:jansi:2.4.1")
-    implementation("net.java.dev.jna:jna:5.14.0")
-    
+    // В версии для Termux удалены зависимости jline, jansi и jna
+    // Они требуют нативные библиотеки, которые не поддерживаются в Termux
     testImplementation(kotlin("test"))
 }
 
@@ -26,6 +24,10 @@ tasks.test {
     useJUnitPlatform()
 }
 
-kotlin {
-    jvmToolchain(17)
+// УДАЛЕНО: jvmToolchain(17) - это вызывает ошибку SystemInfo в Termux
+// Вместо этого используем стандартные настройки целевой версии Java
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile> {
+    kotlinOptions {
+        jvmTarget = "17"
+    }
 }
