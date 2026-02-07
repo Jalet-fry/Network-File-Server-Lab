@@ -15,8 +15,7 @@ application {
 }
 
 dependencies {
-    // В версии для Termux удалены зависимости jline, jansi и jna
-    // Они требуют нативные библиотеки, которые не поддерживаются в Termux
+    // Чистая версия без нативных зависимостей
     testImplementation(kotlin("test"))
 }
 
@@ -24,8 +23,12 @@ tasks.test {
     useJUnitPlatform()
 }
 
-// УДАЛЕНО: jvmToolchain(17) - это вызывает ошибку SystemInfo в Termux
-// Вместо этого используем стандартные настройки целевой версии Java
+// Принудительно устанавливаем версию байт-кода без использования тулчейнов
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
 tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile> {
     kotlinOptions {
         jvmTarget = "17"
