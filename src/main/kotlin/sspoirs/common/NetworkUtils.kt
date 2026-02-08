@@ -39,6 +39,7 @@ object NetworkUtils {
             output.write(buffer, 0, read)
             total += read
             
+            // Вывод прогресса каждые 500мс, чтобы не "висело"
             val now = System.currentTimeMillis()
             if (now - lastPrintTime > 500) {
                 val pct = if (length > 0) (total * 100 / length) else 0
@@ -58,7 +59,10 @@ object NetworkUtils {
         val now = System.currentTimeMillis()
         if (socket != null && total > 0 && now - lastOobTime > 1500) {
             val pct = ((current * 100) / total).toInt()
-            try { socket.sendUrgentData(pct) } catch (e: Exception) {}
+            try { 
+                // Срочные данные согласно ЛР 1
+                socket.sendUrgentData(pct) 
+            } catch (e: Exception) {}
             lastOobTime = now
         }
     }

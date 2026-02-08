@@ -68,14 +68,18 @@ class TcpCommandServer(private val port: Int) {
     }
 
     private fun processInput(key: SelectionKey, session: ClientSession) {
-        val line = session.extractLine() ?: return
-        println("[SERVER] Command from ${session.remoteAddr}: $line")
-        
-        val parts = line.split(" ")
-        val cmd = Command.fromString(parts[0])
-        val args = parts.drop(1)
-        
-        executeCommand(cmd, args, key, session)
+        // Читаем команды в цикле, пока они есть в буфере
+        while (true) {
+            if (session.isUploading) break
+            val line = session.extractLine() ?: break
+            println("[SERVER] Command from ${session.remoteAddr}: $line")
+            
+            val parts = line.split(Regex("\\s+"))
+            val cmd = Command.fromString(parts[0])
+            val args = parts.drop(1)
+            
+            executeCommand(cmd, args, key, session)
+        }
     }
 
     private fun executeCommand(cmd: Command, args: List<String>, key: SelectionKey, session: ClientSession) {
@@ -106,7 +110,6 @@ class TcpCommandServer(private val port: Int) {
         session.fileRaf = RandomAccessFile(file, "r").apply { seek(offset) }
         session.fileRemaining = file.length() - offset
         session.queueMsg("OK ${session.fileRemaining}\n")
-        println("[SERVER] Starting download for ${session.remoteAddr}: ${file.name}")
     }
 
     private fun setupUpload(args: List<String>, session: ClientSession) {
@@ -117,7 +120,21 @@ class TcpCommandServer(private val port: Int) {
         session.fileRaf = RandomAccessFile(File(Constants.SERVER_STORAGE, name), "rw").apply { seek(offset) }
         session.fileRemaining = size
         session.isUploading = true
-        println("[SERVER] Starting upload from ${session.remoteAddr}: $name ($size bytes)")
+        
+        // КРИТИЧЕСКИЙ ФИКС: Если в буфере уже есть данные файла, записываем их
+        val remainingData = session.inputAccumulator.toByteArray()
+        if (remainingData.isNotEmpty()) {
+            val toWrite = Math.min(remainingData.size.toLong(), session.fileRemaining).toInt()
+            session.fileRaf?.write(remainingData, 0, toWrite)
+            session.fileRemaining -= toWrite
+            
+            session.inputAccumulator.reset()
+            if (remainingData.size > toWrite) {
+                session.inputAccumulator.write(remainingData, toWrite, remainingData.size - toWrite)
+            }
+        }
+        
+        if (session.fileRemaining <= 0) finishUpload(session, SelectionKey.OP_READ.let { key -> null } ?: return ) // Handle instant small file
     }
 
     private fun handleUploadChunk(session: ClientSession, channel: SocketChannel, key: SelectionKey) {
@@ -129,13 +146,17 @@ class TcpCommandServer(private val port: Int) {
             session.fileRemaining -= read
         }
         if (session.fileRemaining <= 0 || read == -1) {
-            println("[SERVER] Upload complete for ${session.remoteAddr}")
-            session.fileRaf?.close()
-            session.fileRaf = null
-            session.isUploading = false
-            session.queueMsg("SUCCESS\n")
-            key.interestOps(SelectionKey.OP_READ or SelectionKey.OP_WRITE)
+            finishUpload(session, key)
         }
+    }
+
+    private fun finishUpload(session: ClientSession, key: SelectionKey) {
+        println("[SERVER] Upload complete for ${session.remoteAddr}")
+        session.fileRaf?.close()
+        session.fileRaf = null
+        session.isUploading = false
+        session.queueMsg("SUCCESS\n")
+        key.interestOps(SelectionKey.OP_READ or SelectionKey.OP_WRITE)
     }
 
     private fun doWrite(key: SelectionKey) {
@@ -158,14 +179,13 @@ class TcpCommandServer(private val port: Int) {
     private fun sendChunk(session: ClientSession, channel: SocketChannel) {
         val bytes = ByteArray(4096)
         val toRead = Math.min(bytes.size.toLong(), session.fileRemaining).toInt()
-        val read = session.fileRaf?.read(bytes, 0, toRead) ?: -1
+        val read = try { session.fileRaf?.read(bytes, 0, toRead) ?: -1 } catch (e: Exception) { -1 }
         
         if (read > 0) {
             channel.write(ByteBuffer.wrap(bytes, 0, read))
             session.fileRemaining -= read
         }
         if (session.fileRemaining <= 0) {
-            println("[SERVER] Download complete for ${session.remoteAddr}")
             session.fileRaf?.close()
             session.fileRaf = null
         }
@@ -193,14 +213,20 @@ class TcpCommandServer(private val port: Int) {
 
         fun extractLine(): String? {
             val data = inputAccumulator.toByteArray()
-            val str = String(data)
-            if (!str.contains("\n")) return null
+            var newlineIdx = -1
+            for (i in data.indices) {
+                if (data[i] == '\n'.toByte()) {
+                    newlineIdx = i
+                    break
+                }
+            }
+            if (newlineIdx == -1) return null
             
-            val line = str.substringBefore("\n")
-            val remaining = str.substringAfter("\n").toByteArray()
+            val line = String(data, 0, newlineIdx).trim()
+            val remaining = if (newlineIdx < data.size - 1) data.copyOfRange(newlineIdx + 1, data.size) else byteArrayOf()
             inputAccumulator.reset()
             inputAccumulator.write(remaining)
-            return line.trim()
+            return line
         }
 
         fun queueMsg(txt: String) {
