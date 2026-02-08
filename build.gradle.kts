@@ -15,7 +15,7 @@ application {
 }
 
 dependencies {
-    // Чистая версия без нативных зависимостей
+    // В ЭТОЙ ВЕТКЕ (TERMUX) JLINE УДАЛЕН ДЛЯ МАКСИМАЛЬНОЙ СОВМЕСТИМОСТИ
     testImplementation(kotlin("test"))
 }
 
@@ -23,7 +23,7 @@ tasks.test {
     useJUnitPlatform()
 }
 
-// Принудительно устанавливаем версию байт-кода без использования тулчейнов
+// Принудительная совместимость с Java 17
 java {
     sourceCompatibility = JavaVersion.VERSION_17
     targetCompatibility = JavaVersion.VERSION_17

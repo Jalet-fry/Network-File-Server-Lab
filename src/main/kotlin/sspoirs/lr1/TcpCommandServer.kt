@@ -26,37 +26,34 @@ class TcpCommandServer(private val port: Int) {
                 while (keys.hasNext()) {
                     val key = keys.next()
                     keys.remove()
-                    if (key.isValid) handleSelectionKey(key)
+                    if (key.isValid) {
+                        try {
+                            handleSelectionKey(key)
+                        } catch (e: Exception) {
+                            val addr = (key.attachment() as? ClientSession)?.remoteAddr ?: "unknown"
+                            println("[SERVER] Error handling client $addr: ${e.message}")
+                            closeClient(key)
+                        }
+                    }
                 }
             } catch (e: Exception) {
-                // КРИТИЧЕСКИЙ ФИКС: Сервер не должен умирать из-за ошибки в цикле селектора
-                println("[SERVER ERROR] Loop error: ${e.message}")
+                println("[SERVER] Critical Selector error: ${e.message}")
             }
         }
     }
 
     private fun handleSelectionKey(key: SelectionKey) {
-        try {
-            when {
-                key.isAcceptable -> acceptClient()
-                key.isReadable -> doRead(key)
-                key.isWritable -> doWrite(key)
-            }
-        } catch (e: Exception) {
-            println("[SERVER] Communication error with ${getClientAddr(key)}: ${e.message}")
-            closeClient(key)
+        when {
+            key.isAcceptable -> acceptClient()
+            key.isReadable -> doRead(key)
+            key.isWritable -> doWrite(key)
         }
-    }
-
-    private fun getClientAddr(key: SelectionKey): String {
-        return (key.attachment() as? ClientSession)?.remoteAddr ?: "unknown"
     }
 
     private fun acceptClient() {
         val client = serverChannel.accept()
         client.configureBlocking(false)
         client.socket().keepAlive = true
-        client.socket().oobInline = true 
         client.register(selector, SelectionKey.OP_READ, ClientSession(client.remoteAddress.toString()))
         println("[SERVER] New connection from ${client.remoteAddress}")
     }
@@ -73,7 +70,10 @@ class TcpCommandServer(private val port: Int) {
         val buffer = ByteBuffer.allocate(Constants.BUFFER_SIZE)
         val read = try { channel.read(buffer) } catch (e: IOException) { -1 }
         
-        if (read == -1) return closeClient(key)
+        if (read == -1) {
+            println("[SERVER] Client ${session.remoteAddr} disconnected (read -1)")
+            return closeClient(key)
+        }
 
         buffer.flip()
         session.addToInput(buffer)
@@ -214,8 +214,8 @@ class TcpCommandServer(private val port: Int) {
     }
 
     private fun closeClient(key: SelectionKey) {
-        val session = key.attachment() as ClientSession
-        println("[SERVER] Connection closed for ${session.remoteAddr}")
+        val session = (key.attachment() as? ClientSession) ?: return
+        println("[SERVER] Closing connection for ${session.remoteAddr}")
         try {
             session.fileRaf?.close()
             key.channel().close()
