@@ -49,7 +49,6 @@ class SimpleClient(private val host: String, private val port: Int) {
     private fun connect(): Boolean {
         return try {
             socket = Socket()
-            // Таймаут подключения 5 секунд для стабильности в Termux
             socket?.connect(InetSocketAddress(host, port), 5000)
             socket?.keepAlive = true
             
@@ -129,6 +128,8 @@ class SimpleClient(private val host: String, private val port: Int) {
         FileInputStream(file).use { fis ->
             NetworkUtils.copyStream(fis, outputStream!!, file.length(), socket)
         }
-        println("Server: ${NetworkUtils.readLineBuffered(inputStream!!)}")
+        // Ждем от сервера "SUCCESS", чтобы не смешивать потоки
+        val response = NetworkUtils.readLineBuffered(inputStream!!)
+        println("Server: $response")
     }
 }
