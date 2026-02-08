@@ -1,0 +1,29 @@
+ЭТОТ ФАЙЛ СОДЕРЖИТ УЛУЧШЕНИЯ ДЛЯ ВЕТКИ MAIN (С СОХРАНЕНИЕМ JLINE)
+
+=== 1. ОБНОВЛЕНИЕ ЛОГОВ СЕРВЕРА ===
+Файл: src/main/kotlin/sspoirs/lr1/TcpSessionHandler.kt
+Действие: Полностью заменить содержимое на версию из termux-fix.
+Результат: Сервер на Windows будет подробно писать в консоль все действия клиентов.
+
+=== 2. ПРОГРЕСС-БАР И СТАБИЛЬНОСТЬ ===
+Файл: src/main/kotlin/sspoirs/common/NetworkUtils.kt
+Действие: Полностью заменить содержимое на версию из termux-fix.
+Результат: При передаче файлов будет виден прогресс в процентах, а TCP соединения станут устойчивее.
+
+=== 3. НАСТРОЙКИ GRADLE ===
+Файл: gradle.properties
+Действие: Добавить в конец:
+org.gradle.java.installations.auto-detect=false
+org.gradle.java.installations.auto-download=false
+
+=== 4. ИЗМЕНЕНИЯ В КЛИЕНТЕ (SimpleClient.kt и UdpClient.kt) ===
+В ветке MAIN НЕ НУЖНО удалять JLine.
+Нужно только убедиться, что в методах download/upload вызывается NetworkUtils.copyStream.
+В новой версии copyStream сам выводит прогресс на экран.
+
+ИНСТРУКЦИЯ ПО ПЕРЕНОСУ ЧЕРЕЗ GIT:
+1. git checkout main
+2. git checkout termux-fix -- src/main/kotlin/sspoirs/common/NetworkUtils.kt
+3. git checkout termux-fix -- src/main/kotlin/sspoirs/lr1/TcpSessionHandler.kt
+4. git add .
+5. git commit -m "Merge common stability upgrades from termux-fix"

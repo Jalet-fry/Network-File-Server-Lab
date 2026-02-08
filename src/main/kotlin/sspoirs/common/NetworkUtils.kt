@@ -29,6 +29,7 @@ object NetworkUtils {
         val buffer = ByteArray(Constants.BUFFER_SIZE)
         var total: Long = 0
         val start = System.currentTimeMillis()
+        var lastPrintTime = 0L
 
         while (total < length) {
             val toRead = Math.min(buffer.size.toLong(), length - total).toInt()
@@ -37,10 +38,20 @@ object NetworkUtils {
             
             output.write(buffer, 0, read)
             total += read
+            
+            // Вывод прогресса каждые 500мс, чтобы не "висело"
+            val now = System.currentTimeMillis()
+            if (now - lastPrintTime > 500) {
+                val pct = if (length > 0) (total * 100 / length) else 0
+                print("\r[Progress] $total / $length bytes ($pct%)")
+                lastPrintTime = now
+            }
+            
             handleOobProgress(socket, total, length)
         }
         output.flush()
-        printStats(total, System.currentTimeMillis() - start)
+        val duration = System.currentTimeMillis() - start
+        printStats(total, duration)
         return total
     }
 
@@ -48,7 +59,10 @@ object NetworkUtils {
         val now = System.currentTimeMillis()
         if (socket != null && total > 0 && now - lastOobTime > 1500) {
             val pct = ((current * 100) / total).toInt()
-            try { socket.sendUrgentData(pct) } catch (e: Exception) {}
+            try { 
+                // Срочные данные согласно ЛР 1
+                socket.sendUrgentData(pct) 
+            } catch (e: Exception) {}
             lastOobTime = now
         }
     }
@@ -56,6 +70,6 @@ object NetworkUtils {
     private fun printStats(bytes: Long, ms: Long) {
         if (bytes <= 0) return
         val speed = (bytes / 1024.0) / (Math.max(ms, 1) / 1000.0)
-        println("\n[Transfer] $bytes bytes in ${ms}ms (${String.format("%.2f", speed)} KB/s)")
+        println("\n[Transfer] Complete: $bytes bytes in ${ms}ms (${String.format("%.2f", speed)} KB/s)")
     }
 }
