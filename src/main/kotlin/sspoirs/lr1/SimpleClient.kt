@@ -8,6 +8,7 @@ import sspoirs.common.Command
 import sspoirs.common.Constants
 import sspoirs.common.NetworkUtils
 import java.io.*
+import java.net.InetSocketAddress
 import java.net.Socket
 
 class SimpleClient(private val host: String, private val port: Int) {
@@ -17,12 +18,16 @@ class SimpleClient(private val host: String, private val port: Int) {
     private var serverFiles = mutableListOf<String>()
 
     fun start() {
-        if (!connect()) return
+        println("[DEBUG] Attempting to connect to $host on port $port...")
+        if (!connect()) {
+            println("[ERROR] Failed to connect. Check if the server is running and the IP is correct.")
+            return
+        }
 
         val terminal = try { 
             TerminalBuilder.builder().system(true).build() 
         } catch (e: Exception) {
-            println("\n[WARN] System terminal not available, using dumb terminal. Autocomplete may not work.")
+            println("\n[WARN] System terminal not available, using dumb terminal.")
             TerminalBuilder.builder().dumb(true).build()
         }
 
@@ -31,7 +36,7 @@ class SimpleClient(private val host: String, private val port: Int) {
             .completer(buildCompleter())
             .build()
 
-        println("\nCommands: LS, DOWNLOAD, UPLOAD, TIME, ECHO, EXIT. Type '?' for help.")
+        println("\nConnected! Commands: LS, DOWNLOAD, UPLOAD, TIME, ECHO, EXIT. Type '?' for help.")
 
         while (true) {
             val line = try { lineReader.readLine("TCP > ")?.trim() } catch (e: Exception) { null } ?: break
@@ -58,16 +63,20 @@ class SimpleClient(private val host: String, private val port: Int) {
     )
 
     private fun connect(): Boolean {
-        // ... (rest of the code is unchanged)
         return try {
-            socket = Socket(host, port).apply { keepAlive = true }
+            socket = Socket()
+            // Устанавливаем таймаут подключения 5 секунд, чтобы не виснуть
+            socket?.connect(InetSocketAddress(host, port), 5000)
+            socket?.keepAlive = true
+            
             inputStream = BufferedInputStream(socket!!.getInputStream())
             outputStream = socket!!.getOutputStream()
-            println("Connected to $host:$port")
+            
+            println("[SUCCESS] Connection established with $host:$port")
             updateServerFiles()
             true
         } catch (e: Exception) {
-            println("Connection failed: ${e.message}")
+            println("[FAILED] Could not reach $host:$port. Reason: ${e.message}")
             false
         }
     }
@@ -77,12 +86,17 @@ class SimpleClient(private val host: String, private val port: Int) {
         val cmd = Command.fromString(parts[0])
         val arg = parts.getOrNull(1)
 
-        return when (cmd) {
-            Command.LIST -> { requestFileList(); false }
-            Command.DOWNLOAD -> { arg?.let { initiateDownload(it) }; false }
-            Command.UPLOAD -> { arg?.let { initiateUpload(it) }; false }
-            Command.CLOSE -> true
-            else -> { sendBasicCommand(line); false }
+        return try {
+            when (cmd) {
+                Command.LIST -> { requestFileList(); false }
+                Command.DOWNLOAD -> { arg?.let { initiateDownload(it) }; false }
+                Command.UPLOAD -> { arg?.let { initiateUpload(it) }; false }
+                Command.CLOSE -> true
+                else -> { sendBasicCommand(line); false }
+            }
+        } catch (e: Exception) {
+            println("[ERROR] Connection lost: ${e.message}")
+            true
         }
     }
 
@@ -107,7 +121,8 @@ class SimpleClient(private val host: String, private val port: Int) {
 
     private fun sendBasicCommand(line: String) {
         NetworkUtils.writeLine(outputStream!!, line)
-        println("Server: ${NetworkUtils.readLineBuffered(inputStream!!)}")
+        val response = NetworkUtils.readLineBuffered(inputStream!!)
+        println("Server: $response")
     }
 
     private fun initiateDownload(name: String) {
