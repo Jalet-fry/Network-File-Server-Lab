@@ -17,28 +17,36 @@ class TcpCommandServer(private val port: Int) {
         serverChannel.bind(InetSocketAddress(port))
         serverChannel.configureBlocking(false)
         serverChannel.register(selector, SelectionKey.OP_ACCEPT)
-        println("[SERVER] TCP Multiplexed Server started on port $port...")
+        println("[SERVER v2.2] TCP Multiplexed Server started on port $port...")
         
         while (true) {
-            if (selector.select(500) == 0) continue
-            val keys = selector.selectedKeys().iterator()
-            while (keys.hasNext()) {
-                val key = keys.next()
-                keys.remove()
-                if (key.isValid) handleSelectionKey(key)
+            try {
+                if (selector.select(500) == 0) continue
+                val keys = selector.selectedKeys().iterator()
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    keys.remove()
+                    if (key.isValid) {
+                        try {
+                            handleSelectionKey(key)
+                        } catch (e: Exception) {
+                            val addr = (key.attachment() as? ClientSession)?.remoteAddr ?: "unknown"
+                            println("[SERVER] Error with client $addr: ${e.message}")
+                            closeClient(key)
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                println("[SERVER] Selector loop error: ${e.message}")
             }
         }
     }
 
     private fun handleSelectionKey(key: SelectionKey) {
-        try {
-            when {
-                key.isAcceptable -> acceptClient()
-                key.isReadable -> doRead(key)
-                key.isWritable -> doWrite(key)
-            }
-        } catch (e: Exception) {
-            closeClient(key)
+        when {
+            key.isAcceptable -> acceptClient()
+            key.isReadable -> doRead(key)
+            key.isWritable -> doWrite(key)
         }
     }
 
@@ -46,7 +54,6 @@ class TcpCommandServer(private val port: Int) {
         val client = serverChannel.accept()
         client.configureBlocking(false)
         client.socket().keepAlive = true
-        client.socket().oobInline = true 
         client.register(selector, SelectionKey.OP_READ, ClientSession(client.remoteAddress.toString()))
         println("[SERVER] New connection from ${client.remoteAddress}")
     }
@@ -73,6 +80,7 @@ class TcpCommandServer(private val port: Int) {
     private fun processInput(key: SelectionKey, session: ClientSession) {
         while (!session.isUploading) {
             val line = session.extractLine() ?: break
+            println("[SERVER] Command from ${session.remoteAddr}: $line")
             val parts = line.split(Regex("\\s+"))
             val cmd = Command.fromString(parts[0])
             executeCommand(cmd, parts.drop(1), key, session)
@@ -108,6 +116,7 @@ class TcpCommandServer(private val port: Int) {
         val offset = args.getOrNull(1)?.toLongOrNull() ?: 0L
         val safeOffset = Math.min(offset, file.length())
         
+        println("[SERVER] Sending $fileName from offset $safeOffset")
         session.fileRaf = RandomAccessFile(file, "r").apply { seek(safeOffset) }
         session.fileRemaining = file.length() - safeOffset
         session.queueMsg("OK ${session.fileRemaining}\n")
@@ -121,6 +130,7 @@ class TcpCommandServer(private val port: Int) {
         val file = File(Constants.SERVER_STORAGE, name)
         val actualOffset = if (file.exists()) Math.min(offset, file.length()) else 0L
         
+        println("[SERVER] Receiving $name from offset $actualOffset")
         session.fileRaf = RandomAccessFile(file, "rw").apply { seek(actualOffset) }
         session.fileRemaining = totalSize - actualOffset
         session.isUploading = true
@@ -143,12 +153,13 @@ class TcpCommandServer(private val port: Int) {
     }
 
     private fun handleUploadChunk(session: ClientSession, channel: SocketChannel, key: SelectionKey) {
-        val buffer = ByteBuffer.allocate(Math.min(Constants.BUFFER_SIZE.toLong(), session.fileRemaining).toInt())
+        val bufferSize = Math.min(Constants.BUFFER_SIZE.toLong(), session.fileRemaining).toInt()
+        val buffer = ByteBuffer.allocate(bufferSize)
         val read = try { channel.read(buffer) } catch (e: IOException) { -1 }
         
         if (read > 0) {
             buffer.flip()
-            session.fileRaf?.write(buffer.array(), 0, read)
+            session.fileRaf?.channel?.write(buffer)
             session.fileRemaining -= read
         }
         
@@ -160,6 +171,7 @@ class TcpCommandServer(private val port: Int) {
     }
 
     private fun finishUpload(session: ClientSession, key: SelectionKey?) {
+        println("[SERVER] Upload complete for ${session.remoteAddr}")
         session.fileRaf?.close()
         session.fileRaf = null
         session.isUploading = false
@@ -200,7 +212,8 @@ class TcpCommandServer(private val port: Int) {
     }
 
     private fun closeClient(key: SelectionKey) {
-        val session = key.attachment() as ClientSession
+        val session = (key.attachment() as? ClientSession) ?: return
+        println("[SERVER] Closing connection for ${session.remoteAddr}")
         try {
             session.fileRaf?.close()
             key.channel().close()
@@ -226,7 +239,6 @@ class TcpCommandServer(private val port: Int) {
             val idx = data.indexOf('\n'.toByte())
             if (idx == -1) return null
             
-            // ЯВНО УКАЗЫВАЕМ UTF_8 для поддержки кириллицы
             val line = String(data, 0, idx, Charsets.UTF_8).trim()
             val remaining = if (idx < data.size - 1) data.copyOfRange(idx + 1, data.size) else byteArrayOf()
             inputAccumulator.reset()

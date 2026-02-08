@@ -28,7 +28,7 @@ class SimpleClient(private val host: String, private val port: Int) {
         val terminal = try { 
             TerminalBuilder.builder().system(true).build() 
         } catch (e: Exception) {
-            println("\n[WARN] Advanced terminal failed, falling back to basic.")
+            println("\n[WARN] JLine native failed, using dumb terminal.")
             TerminalBuilder.builder().dumb(true).build()
         }
 
@@ -37,7 +37,7 @@ class SimpleClient(private val host: String, private val port: Int) {
             .completer(buildCompleter())
             .build()
 
-        println("\n[SUCCESS] Connected! Commands: LS, DOWNLOAD, UPLOAD, TIME, ECHO, EXIT. Type '?' for help.")
+        println("\n[SUCCESS] Connected! Commands: LS, DOWNLOAD, UPLOAD, EXIT.")
 
         while (true) {
             val line = try { lineReader.readLine("TCP > ")?.trim() } catch (e: Exception) { null } ?: break
@@ -52,9 +52,7 @@ class SimpleClient(private val host: String, private val port: Int) {
     }
 
     private fun printHelp() {
-        println("\nAvailable commands:")
-        Command.allCommands().forEach { println(" - $it") }
-        println("Server files:")
+        println("\nAvailable commands: LS, DOWNLOAD, UPLOAD, TIME, ECHO, EXIT")
         serverFiles.forEach { (name, size) -> println(" - $name ($size bytes)") }
     }
 
@@ -82,9 +80,8 @@ class SimpleClient(private val host: String, private val port: Int) {
     }
 
     private fun handleCommand(line: String): Boolean {
-        // Улучшенный парсинг: учитывает пробелы внутри кавычек
         val parts = mutableListOf<String>()
-        val m = Pattern.compile("([^\"]\\S*|\".+?\")\\s*").matcher(line)
+        val m = Pattern.compile("([^\"\\s]\\S*|\".+?\")\\s*").matcher(line)
         while (m.find()) {
             parts.add(m.group(1).replace("\"", ""))
         }
@@ -107,10 +104,15 @@ class SimpleClient(private val host: String, private val port: Int) {
                     false 
                 }
                 Command.CLOSE -> true
-                else -> { sendBasicCommand(line); false }
+                else -> { 
+                    NetworkUtils.writeLine(outputStream!!, line)
+                    val resp = NetworkUtils.readLineBuffered(inputStream!!)
+                    println("Server: $resp")
+                    false 
+                }
             }
         } catch (e: Exception) {
-            println("[ERROR] Connection lost: ${e.message}")
+            println("[ERROR] Connection lost.")
             true
         }
     }
@@ -121,16 +123,16 @@ class SimpleClient(private val host: String, private val port: Int) {
             val resp = NetworkUtils.readLineBuffered(inputStream!!) ?: return
             if (resp.startsWith("FILES")) {
                 serverFiles.clear()
-                val filesData = resp.substringAfter("FILES ")
-                if (filesData != "No files") {
-                    filesData.split(";").forEach {
+                val data = resp.substringAfter("FILES ")
+                if (data != "No files") {
+                    data.split(";").forEach {
                         val name = it.substringBefore("(")
                         val size = it.substringAfter("(").substringBefore("b)").toLongOrNull() ?: 0L
                         serverFiles[name] = size
                     }
                 }
             }
-        } catch (e: Exception) { /* ignore */ }
+        } catch (e: Exception) {}
     }
 
     private fun requestFileList() {
@@ -141,22 +143,24 @@ class SimpleClient(private val host: String, private val port: Int) {
         }
     }
 
-    private fun sendBasicCommand(line: String) {
-        NetworkUtils.writeLine(outputStream!!, line)
-        val response = NetworkUtils.readLineBuffered(inputStream!!)
-        println("Server: $response")
-    }
-
     private fun initiateDownload(name: String) {
         val file = File(Constants.CLIENT_STORAGE, name)
         val offset = if (file.exists()) file.length() else 0L
         
-        NetworkUtils.writeLine(outputStream!!, "DOWNLOAD $name $offset")
+        updateServerFiles()
+        val fullSize = serverFiles[name] ?: -1L
         
+        if (fullSize != -1L && offset >= fullSize) {
+            println("[INFO] File '$name' is already fully downloaded.")
+            return
+        }
+
+        NetworkUtils.writeLine(outputStream!!, "DOWNLOAD $name $offset")
         val resp = NetworkUtils.readLineBuffered(inputStream!!) ?: return
+        
         if (resp.startsWith("OK")) {
             val remainingSize = resp.split(" ")[1].toLong()
-            println("[INFO] Downloading $remainingSize bytes...")
+            println("[INFO] Downloading ${if (offset > 0) "remaining " else ""}$remainingSize bytes...")
             
             RandomAccessFile(file, "rw").use { raf ->
                 raf.seek(offset)
@@ -165,7 +169,7 @@ class SimpleClient(private val host: String, private val port: Int) {
                     override fun write(b: ByteArray, off: Int, len: Int) = raf.write(b, off, len)
                     override fun write(b: ByteArray) = raf.write(b)
                 }
-                NetworkUtils.copyStream(inputStream!!, fos, remainingSize, socket)
+                NetworkUtils.copyStream(inputStream!!, fos, remainingSize, socket, offset, fullSize)
             }
             println("\n[SUCCESS] Download finished.")
         } else println("Server: $resp")
@@ -173,7 +177,7 @@ class SimpleClient(private val host: String, private val port: Int) {
 
     private fun initiateUpload(name: String) {
         val file = File(Constants.CLIENT_STORAGE, name)
-        if (!file.exists()) return println("Local file not found: ${file.absolutePath}")
+        if (!file.exists()) return println("Local file not found.")
         
         updateServerFiles()
         val offset = serverFiles[name] ?: 0L
@@ -194,7 +198,7 @@ class SimpleClient(private val host: String, private val port: Int) {
                 override fun read(b: ByteArray, off: Int, len: Int) = raf.read(b, off, len)
                 override fun read(b: ByteArray) = raf.read(b)
             }
-            NetworkUtils.copyStream(fis, outputStream!!, totalSize - offset, socket)
+            NetworkUtils.copyStream(fis, outputStream!!, totalSize - offset, socket, offset, totalSize)
         }
         
         val response = NetworkUtils.readLineBuffered(inputStream!!)
