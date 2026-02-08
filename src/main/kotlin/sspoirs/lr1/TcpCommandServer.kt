@@ -20,12 +20,17 @@ class TcpCommandServer(private val port: Int) {
         println("[SERVER] TCP Multiplexed Server started on port $port...")
         
         while (true) {
-            if (selector.select(500) == 0) continue
-            val keys = selector.selectedKeys().iterator()
-            while (keys.hasNext()) {
-                val key = keys.next()
-                keys.remove()
-                if (key.isValid) handleSelectionKey(key)
+            try {
+                if (selector.select(500) == 0) continue
+                val keys = selector.selectedKeys().iterator()
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    keys.remove()
+                    if (key.isValid) handleSelectionKey(key)
+                }
+            } catch (e: Exception) {
+                // КРИТИЧЕСКИЙ ФИКС: Сервер не должен умирать из-за ошибки в цикле селектора
+                println("[SERVER ERROR] Loop error: ${e.message}")
             }
         }
     }
@@ -38,8 +43,13 @@ class TcpCommandServer(private val port: Int) {
                 key.isWritable -> doWrite(key)
             }
         } catch (e: Exception) {
+            println("[SERVER] Communication error with ${getClientAddr(key)}: ${e.message}")
             closeClient(key)
         }
+    }
+
+    private fun getClientAddr(key: SelectionKey): String {
+        return (key.attachment() as? ClientSession)?.remoteAddr ?: "unknown"
     }
 
     private fun acceptClient() {
@@ -73,6 +83,7 @@ class TcpCommandServer(private val port: Int) {
     private fun processInput(key: SelectionKey, session: ClientSession) {
         while (!session.isUploading) {
             val line = session.extractLine() ?: break
+            println("[SERVER] Command from ${session.remoteAddr}: $line")
             val parts = line.split(Regex("\\s+"))
             val cmd = Command.fromString(parts[0])
             executeCommand(cmd, parts.drop(1), key, session)
@@ -108,6 +119,7 @@ class TcpCommandServer(private val port: Int) {
         val offset = args.getOrNull(1)?.toLongOrNull() ?: 0L
         val safeOffset = Math.min(offset, file.length())
         
+        println("[SERVER] Sending $fileName from offset $safeOffset")
         session.fileRaf = RandomAccessFile(file, "r").apply { seek(safeOffset) }
         session.fileRemaining = file.length() - safeOffset
         session.queueMsg("OK ${session.fileRemaining}\n")
@@ -121,6 +133,7 @@ class TcpCommandServer(private val port: Int) {
         val file = File(Constants.SERVER_STORAGE, name)
         val actualOffset = if (file.exists()) Math.min(offset, file.length()) else 0L
         
+        println("[SERVER] Receiving $name from offset $actualOffset")
         session.fileRaf = RandomAccessFile(file, "rw").apply { seek(actualOffset) }
         session.fileRemaining = totalSize - actualOffset
         session.isUploading = true
@@ -160,6 +173,7 @@ class TcpCommandServer(private val port: Int) {
     }
 
     private fun finishUpload(session: ClientSession, key: SelectionKey?) {
+        println("[SERVER] Upload complete for ${session.remoteAddr}")
         session.fileRaf?.close()
         session.fileRaf = null
         session.isUploading = false
@@ -201,6 +215,7 @@ class TcpCommandServer(private val port: Int) {
 
     private fun closeClient(key: SelectionKey) {
         val session = key.attachment() as ClientSession
+        println("[SERVER] Connection closed for ${session.remoteAddr}")
         try {
             session.fileRaf?.close()
             key.channel().close()
