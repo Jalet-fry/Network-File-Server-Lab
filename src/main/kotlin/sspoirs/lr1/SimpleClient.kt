@@ -1,15 +1,12 @@
 package sspoirs.lr1
 
-import org.jline.reader.LineReaderBuilder
-import org.jline.reader.impl.completer.AggregateCompleter
-import org.jline.reader.impl.completer.StringsCompleter
-import org.jline.terminal.TerminalBuilder
 import sspoirs.common.Command
 import sspoirs.common.Constants
 import sspoirs.common.NetworkUtils
 import java.io.*
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.util.Scanner
 
 class SimpleClient(private val host: String, private val port: Int) {
     private var socket: Socket? = null
@@ -20,26 +17,18 @@ class SimpleClient(private val host: String, private val port: Int) {
     fun start() {
         println("[DEBUG] Attempting to connect to $host on port $port...")
         if (!connect()) {
-            println("[ERROR] Failed to connect. Check if the server is running and the IP is correct.")
+            println("[ERROR] Failed to connect. Check IP and VPN status.")
             return
         }
 
-        val terminal = try { 
-            TerminalBuilder.builder().system(true).build() 
-        } catch (e: Exception) {
-            println("\n[WARN] System terminal not available, using dumb terminal.")
-            TerminalBuilder.builder().dumb(true).build()
-        }
-
-        val lineReader = LineReaderBuilder.builder()
-            .terminal(terminal)
-            .completer(buildCompleter())
-            .build()
-
-        println("\nConnected! Commands: LS, DOWNLOAD, UPLOAD, TIME, ECHO, EXIT. Type '?' for help.")
+        val scanner = Scanner(System.`in`)
+        println("\n[SUCCESS] Connected! Commands: LS, DOWNLOAD, UPLOAD, TIME, ECHO, EXIT. Type '?' for help.")
 
         while (true) {
-            val line = try { lineReader.readLine("TCP > ")?.trim() } catch (e: Exception) { null } ?: break
+            print("TCP > ")
+            if (!scanner.hasNextLine()) break
+            val line = scanner.nextLine().trim()
+            
             if (line.isEmpty()) continue
             if (line == "?") {
                 printHelp()
@@ -57,32 +46,26 @@ class SimpleClient(private val host: String, private val port: Int) {
         serverFiles.forEach { println(" - $it") }
     }
 
-    private fun buildCompleter() = AggregateCompleter(
-        StringsCompleter(Command.allCommands().map { it.lowercase() } + Command.allCommands()),
-        StringsCompleter(serverFiles)
-    )
-
     private fun connect(): Boolean {
         return try {
             socket = Socket()
-            // Устанавливаем таймаут подключения 5 секунд, чтобы не виснуть
             socket?.connect(InetSocketAddress(host, port), 5000)
             socket?.keepAlive = true
             
             inputStream = BufferedInputStream(socket!!.getInputStream())
             outputStream = socket!!.getOutputStream()
             
-            println("[SUCCESS] Connection established with $host:$port")
             updateServerFiles()
             true
         } catch (e: Exception) {
-            println("[FAILED] Could not reach $host:$port. Reason: ${e.message}")
+            println("[FAILED] Connection error: ${e.message}")
             false
         }
     }
 
     private fun handleCommand(line: String): Boolean {
-        val parts = line.split(" ")
+        // Используем Regex для разделения по любому количеству пробелов
+        val parts = line.split(Regex("\\s+"))
         val cmd = Command.fromString(parts[0])
         val arg = parts.getOrNull(1)
 
@@ -95,7 +78,7 @@ class SimpleClient(private val host: String, private val port: Int) {
                 else -> { sendBasicCommand(line); false }
             }
         } catch (e: Exception) {
-            println("[ERROR] Connection lost: ${e.message}")
+            println("[ERROR] Session lost: ${e.message}")
             true
         }
     }
@@ -136,16 +119,22 @@ class SimpleClient(private val host: String, private val port: Int) {
                 raf.seek(offset)
                 NetworkUtils.copyStream(inputStream!!, FileOutputStream(raf.fd), size, socket)
             }
+            println("\n[INFO] Download finished.")
         } else println("Server: $resp")
     }
 
     private fun initiateUpload(name: String) {
+        if (name.isEmpty()) return println("Error: Filename cannot be empty.")
         val file = File(Constants.CLIENT_STORAGE, name)
-        if (!file.exists()) return println("Local file not found.")
+        
+        if (!file.exists()) return println("Local file not found: ${file.absolutePath}")
+        if (file.isDirectory) return println("Error: '${name}' is a directory, not a file.")
+        
         NetworkUtils.writeLine(outputStream!!, "UPLOAD $name ${file.length()} 0")
         FileInputStream(file).use { fis ->
             NetworkUtils.copyStream(fis, outputStream!!, file.length(), socket)
         }
-        println("Server: ${NetworkUtils.readLineBuffered(inputStream!!)}")
+        val response = NetworkUtils.readLineBuffered(inputStream!!)
+        println("Server: $response")
     }
 }
