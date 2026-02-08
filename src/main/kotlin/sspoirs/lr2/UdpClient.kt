@@ -16,17 +16,24 @@ class UdpClient(private val host: String, private val port: Int) {
     private var serverFiles = mutableListOf<String>()
 
     fun start() {
-        println("UDP Client started. Connected to $host:$port (Reliable Mode)")
+        println("[DEBUG] UDP Client started. Connecting to $host:$port (Reliable Mode)")
         updateServerFiles()
 
-        val terminal = TerminalBuilder.builder().system(true).build()
+        val terminal = try {
+            TerminalBuilder.builder().system(true).build()
+        } catch (e: Exception) {
+            TerminalBuilder.builder().dumb(true).build()
+        }
+
         val lineReader = LineReaderBuilder.builder()
             .terminal(terminal)
             .completer(AggregateCompleter(
-                StringsCompleter(Command.allCommands() + listOf("ls", "exit", "quit")),
-                StringsCompleter { serverFiles }
+                StringsCompleter(Command.allCommands().map { it.lowercase() } + listOf("ls", "exit", "quit")),
+                StringsCompleter(serverFiles)
             ))
             .build()
+
+        println("[SUCCESS] UDP Ready. Commands: LS, DOWNLOAD, UPLOAD, EXIT.")
 
         while (true) {
             val line = try { lineReader.readLine("UDP > ")?.trim() } catch (e: Exception) { null } ?: break
@@ -36,7 +43,7 @@ class UdpClient(private val host: String, private val port: Int) {
     }
 
     private fun handleCommand(line: String): Boolean {
-        val parts = line.split(" ")
+        val parts = line.split(Regex("\\s+"))
         val cmd = Command.fromString(parts[0])
         return when (cmd) {
             Command.LIST -> { requestFileList(); false }
@@ -48,16 +55,20 @@ class UdpClient(private val host: String, private val port: Int) {
     }
 
     private fun updateServerFiles() {
-        reliableUdp.send(2, "LS".toByteArray(), serverAddress, port)
-        val resp = reliableUdp.receive() ?: return
-        if (resp.type == 2.toByte()) {
-            val content = String(resp.payload)
-            if (content.startsWith("FILES")) {
-                serverFiles.clear()
-                content.substringAfter("FILES ").split(";").forEach {
-                    if (it.contains("(")) serverFiles.add(it.substringBefore("("))
+        try {
+            reliableUdp.send(2, "LS".toByteArray(), serverAddress, port)
+            val resp = reliableUdp.receive() ?: return
+            if (resp.type == 2.toByte()) {
+                val content = String(resp.payload)
+                if (content.startsWith("FILES")) {
+                    serverFiles.clear()
+                    content.substringAfter("FILES ").split(";").forEach {
+                        if (it.contains("(")) serverFiles.add(it.substringBefore("("))
+                    }
                 }
             }
+        } catch (e: Exception) {
+            println("[WARN] Could not update file list from server.")
         }
     }
 
@@ -87,6 +98,8 @@ class UdpClient(private val host: String, private val port: Int) {
     private fun receiveFile(file: File, size: Long) {
         var received = 0L
         val start = System.currentTimeMillis()
+        var lastPrintTime = 0L
+
         RandomAccessFile(file, "rw").use { raf ->
             raf.seek(file.length())
             while (received < size) {
@@ -95,6 +108,12 @@ class UdpClient(private val host: String, private val port: Int) {
                     reliableUdp.sendAck(p.seq, p.address, p.port)
                     raf.write(p.payload)
                     received += p.payload.size
+                    
+                    val now = System.currentTimeMillis()
+                    if (now - lastPrintTime > 500) {
+                        println("\r[Progress] $received / $size bytes (${(received * 100 / size)}%)")
+                        lastPrintTime = now
+                    }
                 }
             }
         }
@@ -104,7 +123,9 @@ class UdpClient(private val host: String, private val port: Int) {
 
     private fun initiateUpload(name: String) {
         val file = File(Constants.CLIENT_STORAGE, name)
-        if (!file.exists()) return println("Local file not found.")
+        if (!file.exists()) return println("Local file not found: ${file.absolutePath}")
+        if (file.isDirectory) return println("Error: '${name}' is a directory.")
+
         reliableUdp.send(2, "UPLOAD $name ${file.length()} 0".toByteArray(), serverAddress, port)
         RandomAccessFile(file, "r").use { raf ->
             val buffer = ByteArray(Constants.UDP_PACKET_SIZE)
