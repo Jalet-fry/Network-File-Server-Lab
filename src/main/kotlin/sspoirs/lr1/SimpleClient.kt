@@ -64,15 +64,24 @@ class SimpleClient(private val host: String, private val port: Int) {
     }
 
     private fun handleCommand(line: String): Boolean {
-        val parts = line.split(" ")
+        // РЕШЕНИЕ ПРОБЛЕМЫ ПРОБЕЛОВ: Разделяем по любому количеству пробельных символов
+        val parts = line.split(Regex("\\s+"))
         val cmd = Command.fromString(parts[0])
         val arg = parts.getOrNull(1)
 
         return try {
             when (cmd) {
                 Command.LIST -> { requestFileList(); false }
-                Command.DOWNLOAD -> { arg?.let { initiateDownload(it) }; false }
-                Command.UPLOAD -> { arg?.let { initiateUpload(it) }; false }
+                Command.DOWNLOAD -> { 
+                    if (arg.isNullOrEmpty()) println("Error: Filename required for DOWNLOAD")
+                    else initiateDownload(arg)
+                    false 
+                }
+                Command.UPLOAD -> { 
+                    if (arg.isNullOrEmpty()) println("Error: Filename required for UPLOAD")
+                    else initiateUpload(arg)
+                    false 
+                }
                 Command.CLOSE -> true
                 else -> { sendBasicCommand(line); false }
             }
@@ -118,17 +127,20 @@ class SimpleClient(private val host: String, private val port: Int) {
                 raf.seek(offset)
                 NetworkUtils.copyStream(inputStream!!, FileOutputStream(raf.fd), size, socket)
             }
+            println("\n[INFO] Download finished.")
         } else println("Server: $resp")
     }
 
     private fun initiateUpload(name: String) {
         val file = File(Constants.CLIENT_STORAGE, name)
-        if (!file.exists()) return println("Local file not found.")
+        
+        if (!file.exists()) return println("Local file not found: ${file.absolutePath}")
+        if (file.isDirectory) return println("Error: '${name}' is a directory.")
+        
         NetworkUtils.writeLine(outputStream!!, "UPLOAD $name ${file.length()} 0")
         FileInputStream(file).use { fis ->
             NetworkUtils.copyStream(fis, outputStream!!, file.length(), socket)
         }
-        // Ждем от сервера "SUCCESS", чтобы не смешивать потоки
         val response = NetworkUtils.readLineBuffered(inputStream!!)
         println("Server: $response")
     }
