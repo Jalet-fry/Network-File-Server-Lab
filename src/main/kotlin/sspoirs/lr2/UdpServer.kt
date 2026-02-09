@@ -11,7 +11,7 @@ class UdpServer(private val port: Int) {
     private val reliableUdp = ReliableUdp(socket)
 
     fun start() {
-        println("[UDP SERVER v2.3] Listening on port $port...")
+        println("[UDP SERVER v2.4] Listening on port $port...")
         while (true) {
             try {
                 val packet = reliableUdp.receive(0) ?: continue 
@@ -67,7 +67,6 @@ class UdpServer(private val port: Int) {
             var sent = 0L
             val buffer = ByteArray(Constants.UDP_PACKET_SIZE)
             
-            // УВЕЛИЧЕННОЕ ОКНО ДЛЯ СКОРОСТИ (ЛР 2)
             val windowSize = 50 
             while (sent < remaining) {
                 var lastSeq = 0
@@ -79,8 +78,11 @@ class UdpServer(private val port: Int) {
                     sent += read
                     if (sent >= remaining) break
                 }
-                // Ждем подтверждение только для последнего пакета в пачке
-                reliableUdp.waitForAck(lastSeq, 500)
+                // Если клиент не ответил на пачку за 1 сек — прекращаем передачу, он отвалился.
+                if (!reliableUdp.waitForAck(lastSeq, 1000)) {
+                    println("[UDP] Client $address stopped responding. Aborting download.")
+                    return 
+                }
             }
         }
         val duration = System.currentTimeMillis() - start
@@ -90,16 +92,20 @@ class UdpServer(private val port: Int) {
 
     private fun handleUpload(name: String?, size: Long, offset: Long, addr: InetAddress, port: Int) {
         val file = File(Constants.SERVER_STORAGE, name ?: return)
-        val toReceive = size - offset // КРИТИЧЕСКИЙ ФИКС: принимаем только остаток
+        val toReceive = size - offset
         var totalReceived = 0L
         val start = System.currentTimeMillis()
 
         RandomAccessFile(file, "rw").use { raf ->
             raf.seek(offset)
             while (totalReceived < toReceive) {
+                // Если данных нет 5 секунд — сбрасываем
                 val p = reliableUdp.receive(5000) ?: break 
                 if (p.type == 0.toByte()) {
-                    reliableUdp.sendAck(p.seq, p.address, p.port)
+                    // ACK шлем раз в 20 пакетов, чтобы не тормозить
+                    if (p.seq % 20 == 0 || totalReceived + p.payload.size >= toReceive) {
+                        reliableUdp.sendAck(p.seq, p.address, p.port)
+                    }
                     raf.write(p.payload)
                     totalReceived += p.payload.size
                 }
