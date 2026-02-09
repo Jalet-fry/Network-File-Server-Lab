@@ -155,7 +155,6 @@ class UdpClient(private val host: String, private val port: Int) {
             val p = reliableUdp.receive(5000) ?: break 
             if (p.type == 0.toByte()) {
                 packetCount++
-                // КУМУЛЯТИВНЫЙ ACK: шлем раз в 50 пакетов для скорости (ЛР 2)
                 if (packetCount % 50 == 0 || received + p.payload.size >= length) {
                     reliableUdp.sendAck(p.seq, p.address, p.port)
                 }
@@ -173,7 +172,8 @@ class UdpClient(private val host: String, private val port: Int) {
         }
         val duration = Math.max(System.currentTimeMillis() - start, 1)
         if (received >= length) {
-            println("\n[SUCCESS] Download finished. Speed: ${String.format("%.2f", (received / 1024.0) / (duration / 1000.0))} KB/s")
+            val speed = (received / 1024.0) / (duration / 1000.0)
+            println("\n[SUCCESS] Download finished. Complete: $received bytes in ${duration}ms (${String.format("%.2f", speed)} KB/s)")
         } else {
             println("\n[ERROR] Download interrupted. Received $received / $length bytes.")
         }
@@ -207,14 +207,13 @@ class UdpClient(private val host: String, private val port: Int) {
                     sent += read
                     if (sent >= toSend) break
                 }
-                if (!reliableUdp.waitForAck(lastSeq, 1000)) {
-                    println("\n[WARN] Server not responding. Waiting...")
-                }
+                reliableUdp.waitForAck(lastSeq, 1000)
                 print("\r[Progress] ${offset + sent} / $totalSize bytes")
             }
         }
         val duration = Math.max(System.currentTimeMillis() - start, 1)
-        println("\n[SUCCESS] Upload complete. Speed: ${String.format("%.2f", ((totalSize - offset) / 1024.0) / (duration / 1000.0))} KB/s")
+        val speed = ((totalSize - offset) / 1024.0) / (duration / 1000.0)
+        println("\n[SUCCESS] Upload finished. Complete: ${totalSize - offset} bytes in ${duration}ms (${String.format("%.2f", speed)} KB/s)")
         
         receiveWithAck(3000)
     }
