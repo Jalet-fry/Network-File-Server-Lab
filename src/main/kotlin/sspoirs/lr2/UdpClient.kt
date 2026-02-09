@@ -24,7 +24,7 @@ class UdpClient(private val host: String, private val port: Int) {
     private var useFallbackScanner = false
 
     fun start() {
-        println("[DEBUG] UDP Client started (v3.5 Reliable Mode). Host: $host:$port")
+        println("[DEBUG] UDP Client started (v3.8 Pro Mode). Host: $host:$port")
         updateServerFiles()
 
         var lineReader: LineReader? = null
@@ -160,15 +160,29 @@ class UdpClient(private val host: String, private val port: Int) {
         val start = System.currentTimeMillis()
         var lastPrint = 0L
         var lastPSeq = -1
+        var timeouts = 0
 
         while (received < length) {
-            val p = reliableUdp.receive(5000) ?: break 
+            val p = reliableUdp.receive(5000)
+            if (p == null) {
+                timeouts++
+                if (timeouts > 5) {
+                    if (received >= length * 0.999) break // Почти всё дошло
+                    else { println("\n[ERROR] Connection lost."); break }
+                }
+                continue
+            }
+            timeouts = 0
+
             if (p.type == 0.toByte()) {
                 if (p.seq <= lastPSeq && lastPSeq != -1) {
                     reliableUdp.sendAck(p.seq, p.address, p.port)
                     continue
                 }
-                if (p.seq % 50 == 0 || received + p.payload.size >= length) {
+                
+                // АДАПТИВНЫЙ ACK: чаще в конце (согласно совету)
+                val ackFreq = if (received >= length * 0.95) 5 else 50
+                if (p.seq % ackFreq == 0 || received + p.payload.size >= length) {
                     reliableUdp.sendAck(p.seq, p.address, p.port)
                 }
                 raf.write(p.payload)
@@ -182,17 +196,21 @@ class UdpClient(private val host: String, private val port: Int) {
                     print("\r[Progress] $currentTotal / $fullSize bytes ($pct%)")
                     lastPrint = now
                 }
+            } else if (p.type == 2.toByte() && String(p.payload) == "DOWNLOAD_COMPLETE") {
+                break
             }
         }
         
-        if (received >= length) {
-            repeat(3) { 
-                reliableUdp.sendAck(lastPSeq, serverAddress, port)
-                Thread.sleep(5)
-            }
-            val duration = Math.max(System.currentTimeMillis() - start, 1)
-            val speed = (received / 1024.0) / (duration / 1000.0)
-            println("\n[SUCCESS] Complete: $received bytes in ${duration}ms (${String.format("%.2f", speed)} KB/s)")
+        // Финальное рукопожатие
+        repeat(5) { 
+            reliableUdp.sendAck(lastPSeq, serverAddress, port)
+            Thread.sleep(10)
+        }
+
+        val duration = Math.max(System.currentTimeMillis() - start, 1)
+        val speed = (received / 1024.0) / (duration / 1000.0)
+        if (received >= length * 0.999) {
+            println("\n[SUCCESS] Download finished. Speed: ${String.format("%.2f", speed)} KB/s")
         } else {
             println("\n[ERROR] Download interrupted. Received $received / $length bytes.")
         }
@@ -232,7 +250,7 @@ class UdpClient(private val host: String, private val port: Int) {
                         windowBytes += payload.size
                         if (sent + windowBytes >= toSend) break
                     }
-                    if (!reliableUdp.waitForAck(windowStartSeq + windowSize - 1, 1000)) {
+                    if (!reliableUdp.waitForAck(windowStartSeq + windowSize / 2, 1000)) {
                         fc.position(windowStartPos)
                         continue
                     }
@@ -243,8 +261,7 @@ class UdpClient(private val host: String, private val port: Int) {
                 }
             }
             val duration = Math.max(System.currentTimeMillis() - start, 1)
-            val totalBytes = totalSize - offset
-            val speedKb = (totalBytes / 1024.0) / (duration / 1000.0)
+            val speedKb = ((totalSize - offset) / 1024.0) / (duration / 1000.0)
             println("\n[SUCCESS] Upload finished. Speed: ${String.format("%.2f", speedKb)} KB/s")
             receiveWithAck(3000)
         } catch (e: Exception) { println("[ERROR] Upload failed.") }

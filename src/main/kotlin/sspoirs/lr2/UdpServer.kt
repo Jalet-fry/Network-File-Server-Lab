@@ -16,7 +16,7 @@ class UdpServer(private val port: Int) {
     private val reliableUdp = ReliableUdp(socket)
 
     fun start() {
-        println("[UDP SERVER v3.7] Listening on port $port...")
+        println("[UDP SERVER v3.8] Listening on port $port...")
         while (true) {
             try {
                 val packet = reliableUdp.receive(0) ?: continue 
@@ -72,7 +72,7 @@ class UdpServer(private val port: Int) {
             val fc = raf.channel
             fc.position(offset)
             val buffer = ByteBuffer.allocate(Constants.UDP_PACKET_SIZE)
-            val windowSize = 256 // МАКСИМАЛЬНЫЙ РАЗГОН
+            val windowSize = 200
             var sentBytes = 0L
 
             while (sentBytes < remaining) {
@@ -92,21 +92,43 @@ class UdpServer(private val port: Int) {
                     if (sentBytes + currentWindowBytes >= remaining) break
                 }
 
-                // Ждем ACK окна. Если это финал - мы более терпимы к потере
-                if (!reliableUdp.waitForAck(windowStartSeq + (currentWindowBytes/Constants.UDP_PACKET_SIZE).toInt() - 1, 1000)) {
-                    if (sentBytes + currentWindowBytes >= remaining) break 
-                    println("[UDP] Window loss, retrying...")
+                // Усиленное ожидание ACK (согласно совету - больше попыток в конце)
+                val isEnd = (sentBytes + currentWindowBytes >= remaining)
+                val maxAttempts = if (isEnd) 10 else 5
+                
+                var success = false
+                for (attempt in 1..maxAttempts) {
+                    if (reliableUdp.waitForAck(windowStartSeq + (currentWindowBytes/Constants.UDP_PACKET_SIZE).toInt() - 1, 1000)) {
+                        success = true
+                        break
+                    }
+                    // Перепосылка
                     fc.position(windowStartPos)
-                    continue
+                    for (i in 0 until windowSize) {
+                        buffer.clear()
+                        if (fc.read(buffer) <= 0) break
+                        buffer.flip()
+                        val d = ByteArray(buffer.remaining()); buffer.get(d)
+                        reliableUdp.sendFast(0, d, address, port, forcedSeq = windowStartSeq + i)
+                    }
                 }
+
+                if (!success) {
+                    println("[UDP] Client $address timed out. Aborting.")
+                    return
+                }
+                
                 sentBytes += currentWindowBytes
                 val pkts = (currentWindowBytes + Constants.UDP_PACKET_SIZE - 1) / Constants.UDP_PACKET_SIZE
                 reliableUdp.advanceSeq(pkts.toInt())
             }
         }
+        
+        // Сигнал завершения (ЛР 2)
+        reliableUdp.sendReliable(2, "DOWNLOAD_COMPLETE".toByteArray(), address, port)
+        
         val duration = Math.max(System.currentTimeMillis() - start, 1)
         println("[UDP] Download complete. Speed: ${String.format("%.2f", (remaining / 1024.0) / (duration / 1000.0))} KB/s")
-        Thread.sleep(200)
         reliableUdp.clearQueue()
     }
 
@@ -142,6 +164,6 @@ class UdpServer(private val port: Int) {
         }
         val duration = Math.max(System.currentTimeMillis() - start, 1)
         reliableUdp.sendReliable(2, "SUCCESS".toByteArray(), addr, port)
-        println("[UDP] Upload complete. Speed: ${String.format("%.2f", (totalReceived / 1024.0) / (duration / 1000.0))} KB/s")
+        println("[UDP] Upload finished. Speed: ${String.format("%.2f", (totalReceived / 1024.0) / (duration / 1000.0))} KB/s")
     }
 }
