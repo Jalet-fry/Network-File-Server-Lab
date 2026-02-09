@@ -9,6 +9,7 @@ import sspoirs.common.*
 import java.io.*
 import java.net.DatagramSocket
 import java.net.InetAddress
+import java.nio.ByteBuffer
 import java.util.Scanner
 import java.util.regex.Pattern
 
@@ -145,7 +146,7 @@ class UdpClient(private val host: String, private val port: Int) {
             
             if (status.startsWith("OK")) {
                 val remainingSize = status.split(" ")[1].toLong()
-                println("[INFO] Downloading ${if (offset > 0) "remaining " else ""}$remainingSize bytes...")
+                println("[INFO] Downloading $remainingSize bytes...")
                 RandomAccessFile(file, "rw").use { raf ->
                     raf.seek(offset)
                     receiveFileData(raf, remainingSize, offset, fullSize)
@@ -242,7 +243,9 @@ class UdpClient(private val host: String, private val port: Int) {
                 }
             }
             val duration = Math.max(System.currentTimeMillis() - start, 1)
-            println("\n[SUCCESS] Upload finished. Speed: ${String.format("%.2f", ((totalSize - offset) / 1024.0) / (duration / 1000.0))} KB/s")
+            val totalBytes = totalSize - offset
+            val speedKb = (totalBytes / 1024.0) / (duration / 1000.0)
+            println("\n[SUCCESS] Upload finished. Speed: ${String.format("%.2f", speedKb)} KB/s")
             receiveWithAck(3000)
         } catch (e: Exception) { println("[ERROR] Upload failed.") }
     }
