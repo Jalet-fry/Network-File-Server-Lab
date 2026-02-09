@@ -10,13 +10,13 @@ object Constants {
     
     // UDP specific
     const val UDP_PACKET_SIZE = 1400
-    const val UDP_TIMEOUT = 500L
+    const val UDP_TIMEOUT = 1000L // 1 секунда - безопасный таймаут для Wi-Fi
     const val MAX_RETRIES = 5
     
     // Thread Pool (Lab 4)
     const val THREAD_POOL_N_MIN = 2
     const val THREAD_POOL_N_MAX = 10
-    const val IDLE_TIMEOUT_MS = 10000L // 10 секунд
+    const val IDLE_TIMEOUT_MS = 60000L // 1 минута - удобно для демонстрации
     
     const val SERVER_STORAGE = "files-server"
     const val CLIENT_STORAGE = "files-client"

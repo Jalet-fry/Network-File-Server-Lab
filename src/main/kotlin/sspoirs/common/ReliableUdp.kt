@@ -10,7 +10,9 @@ class ReliableUdp(private val socket: DatagramSocket) {
     private var seqNum = 0
     private val buffer = ByteArray(Constants.UDP_PACKET_SIZE + 10)
 
-    fun send(type: Byte, payload: ByteArray, address: InetAddress, port: Int) {
+    fun getSeqNum(): Int = seqNum
+
+    fun send(type: Byte, payload: ByteArray, address: InetAddress, port: Int, requireAck: Boolean = true) {
         val data = ByteArray(5 + payload.size)
         data[0] = type
         writeInt(data, 1, seqNum)
@@ -18,9 +20,11 @@ class ReliableUdp(private val socket: DatagramSocket) {
 
         val packet = DatagramPacket(data, data.size, address, port)
         
-        // Для данных используем чуть больший таймаут и больше попыток
-        val timeout = if (type == 0.toByte()) 2000 else 1000
-        retrySend(packet, seqNum, timeout)
+        if (requireAck) {
+            retrySend(packet, seqNum)
+        } else {
+            socket.send(packet)
+        }
         seqNum++
     }
 
@@ -40,33 +44,39 @@ class ReliableUdp(private val socket: DatagramSocket) {
 
     fun sendAck(seq: Int, address: InetAddress, port: Int) {
         val data = ByteArray(5)
-        data[0] = 1 // Type ACK
+        data[0] = 1 
         writeInt(data, 1, seq)
         socket.send(DatagramPacket(data, data.size, address, port))
     }
 
-    private fun retrySend(packet: DatagramPacket, seq: Int, timeout: Int) {
+    private fun retrySend(packet: DatagramPacket, seq: Int) {
         var attempts = 0
-        while (attempts < 5) {
-            socket.send(packet)
-            if (waitForAck(seq, timeout)) return
+        val timeout = Constants.UDP_TIMEOUT.toInt()
+        while (attempts < Constants.MAX_RETRIES) {
+            try {
+                socket.send(packet)
+                if (waitForAck(seq, timeout)) return
+            } catch (e: Exception) {}
             attempts++
         }
-        throw IOException("UDP failed: No ACK for seq $seq")
+        if (seq > 0) throw IOException("UDP Timeout for seq $seq")
     }
 
-    private fun waitForAck(expectedSeq: Int, timeout: Int): Boolean {
+    fun waitForAck(expectedSeq: Int, timeout: Int): Boolean {
         val ackBuf = ByteArray(5)
         val ackPacket = DatagramPacket(ackBuf, ackBuf.size)
-        return try {
-            socket.soTimeout = timeout
-            socket.receive(ackPacket)
-            ackBuf[0] == 1.toByte() && readInt(ackBuf, 1) == expectedSeq
-        } catch (e: SocketTimeoutException) {
-            false
-        } catch (e: Exception) {
-            false
-        }
+        val start = System.currentTimeMillis()
+        try {
+            while (System.currentTimeMillis() - start < timeout) {
+                socket.soTimeout = timeout
+                socket.receive(ackPacket)
+                // Если пришел ACK с номером >= ожидаемого, значит пачка дошла
+                if (ackBuf[0] == 1.toByte() && (expectedSeq == -1 || readInt(ackBuf, 1) >= expectedSeq)) {
+                    return true
+                }
+            }
+        } catch (e: Exception) {}
+        return false
     }
 
     private fun writeInt(buf: ByteArray, offset: Int, v: Int) {

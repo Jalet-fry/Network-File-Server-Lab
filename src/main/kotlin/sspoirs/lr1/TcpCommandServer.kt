@@ -17,7 +17,7 @@ class TcpCommandServer(private val port: Int) {
         serverChannel.bind(InetSocketAddress(port))
         serverChannel.configureBlocking(false)
         serverChannel.register(selector, SelectionKey.OP_ACCEPT)
-        println("[SERVER v2.2] TCP Multiplexed Server started on port $port...")
+        println("[SERVER v2.3] TCP Multiplexed Server started on port $port...")
         
         while (true) {
             try {
@@ -54,6 +54,8 @@ class TcpCommandServer(private val port: Int) {
         val client = serverChannel.accept()
         client.configureBlocking(false)
         client.socket().keepAlive = true
+        // ВАЖНО: oobInline = false, чтобы байт прогресса не портил файл!
+        client.socket().oobInline = false 
         client.register(selector, SelectionKey.OP_READ, ClientSession(client.remoteAddress.toString()))
         println("[SERVER] New connection from ${client.remoteAddress}")
     }
@@ -116,9 +118,10 @@ class TcpCommandServer(private val port: Int) {
         val offset = args.getOrNull(1)?.toLongOrNull() ?: 0L
         val safeOffset = Math.min(offset, file.length())
         
-        println("[SERVER] Sending $fileName from offset $safeOffset")
         session.fileRaf = RandomAccessFile(file, "r").apply { seek(safeOffset) }
         session.fileRemaining = file.length() - safeOffset
+        session.transferStartTime = System.currentTimeMillis()
+        session.transferTotalBytes = session.fileRemaining
         session.queueMsg("OK ${session.fileRemaining}\n")
     }
 
@@ -130,10 +133,11 @@ class TcpCommandServer(private val port: Int) {
         val file = File(Constants.SERVER_STORAGE, name)
         val actualOffset = if (file.exists()) Math.min(offset, file.length()) else 0L
         
-        println("[SERVER] Receiving $name from offset $actualOffset")
         session.fileRaf = RandomAccessFile(file, "rw").apply { seek(actualOffset) }
         session.fileRemaining = totalSize - actualOffset
         session.isUploading = true
+        session.transferStartTime = System.currentTimeMillis()
+        session.transferTotalBytes = session.fileRemaining
         
         processRemainingBuffer(session)
         if (session.fileRemaining <= 0) finishUpload(session, null)
@@ -153,8 +157,7 @@ class TcpCommandServer(private val port: Int) {
     }
 
     private fun handleUploadChunk(session: ClientSession, channel: SocketChannel, key: SelectionKey) {
-        val bufferSize = Math.min(Constants.BUFFER_SIZE.toLong(), session.fileRemaining).toInt()
-        val buffer = ByteBuffer.allocate(bufferSize)
+        val buffer = ByteBuffer.allocate(Math.min(Constants.BUFFER_SIZE.toLong(), session.fileRemaining).toInt())
         val read = try { channel.read(buffer) } catch (e: IOException) { -1 }
         
         if (read > 0) {
@@ -171,7 +174,10 @@ class TcpCommandServer(private val port: Int) {
     }
 
     private fun finishUpload(session: ClientSession, key: SelectionKey?) {
-        println("[SERVER] Upload complete for ${session.remoteAddr}")
+        val duration = System.currentTimeMillis() - session.transferStartTime
+        val speed = (session.transferTotalBytes / 1024.0) / (Math.max(duration, 1) / 1000.0)
+        println("[SERVER] Upload complete for ${session.remoteAddr}. Speed: ${String.format("%.2f", speed)} KB/s")
+        
         session.fileRaf?.close()
         session.fileRaf = null
         session.isUploading = false
@@ -206,6 +212,10 @@ class TcpCommandServer(private val port: Int) {
             session.fileRemaining -= read
         }
         if (session.fileRemaining <= 0) {
+            val duration = System.currentTimeMillis() - session.transferStartTime
+            val speed = (session.transferTotalBytes / 1024.0) / (Math.max(duration, 1) / 1000.0)
+            println("[SERVER] Download complete for ${session.remoteAddr}. Speed: ${String.format("%.2f", speed)} KB/s")
+            
             session.fileRaf?.close()
             session.fileRaf = null
         }
@@ -213,7 +223,6 @@ class TcpCommandServer(private val port: Int) {
 
     private fun closeClient(key: SelectionKey) {
         val session = (key.attachment() as? ClientSession) ?: return
-        println("[SERVER] Closing connection for ${session.remoteAddr}")
         try {
             session.fileRaf?.close()
             key.channel().close()
@@ -227,6 +236,9 @@ class TcpCommandServer(private val port: Int) {
         var fileRaf: RandomAccessFile? = null
         var fileRemaining: Long = 0
         var isUploading: Boolean = false
+        
+        var transferStartTime: Long = 0
+        var transferTotalBytes: Long = 0
 
         fun addToInput(buf: ByteBuffer) {
             val arr = ByteArray(buf.remaining())
