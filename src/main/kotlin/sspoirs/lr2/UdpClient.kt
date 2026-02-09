@@ -152,11 +152,12 @@ class UdpClient(private val host: String, private val port: Int) {
         var packetCount = 0
 
         while (received < length) {
-            val p = reliableUdp.receive(5000) ?: break // Ждем пакет 5 секунд
+            // Ждем пакет данных. Если тишина 5 сек - прерываемся
+            val p = reliableUdp.receive(5000) ?: break 
             if (p.type == 0.toByte()) {
                 packetCount++
-                // Кумулятивный ACK: раз в 32 пакета для скорости
-                if (packetCount % 32 == 0 || received + p.payload.size >= length) {
+                // КУМУЛЯТИВНЫЙ ACK: шлем раз в 50 пакетов для скорости
+                if (packetCount % 50 == 0 || received + p.payload.size >= length) {
                     reliableUdp.sendAck(p.seq, p.address, p.port)
                 }
                 raf.write(p.payload)
@@ -175,7 +176,7 @@ class UdpClient(private val host: String, private val port: Int) {
         if (received >= length) {
             println("\n[SUCCESS] Download finished. Speed: ${String.format("%.2f", (received / 1024.0) / (duration / 1000.0))} KB/s")
         } else {
-            println("\n[ERROR] Download interrupted. Received $received / $length bytes.")
+            println("\n[ERROR] Download interrupted. Received only $received / $length bytes.")
         }
     }
 
@@ -195,7 +196,7 @@ class UdpClient(private val host: String, private val port: Int) {
             val buffer = ByteArray(Constants.UDP_PACKET_SIZE)
             var sent = 0L
             val toSend = totalSize - offset
-            val windowSize = 64
+            val windowSize = 100
             
             while (sent < toSend) {
                 var lastSeq = 0
@@ -207,9 +208,8 @@ class UdpClient(private val host: String, private val port: Int) {
                     sent += read
                     if (sent >= toSend) break
                 }
-                // Ждем ACK окна
-                if (!reliableUdp.waitForAck(lastSeq, 2000)) {
-                    println("\n[WARN] Retrying window from seq $lastSeq...")
+                if (!reliableUdp.waitForAck(lastSeq, 1000)) {
+                    println("\n[WARN] Server not responding. Waiting...")
                 }
                 print("\r[Progress] ${offset + sent} / $totalSize bytes")
             }
@@ -217,6 +217,6 @@ class UdpClient(private val host: String, private val port: Int) {
         val duration = Math.max(System.currentTimeMillis() - start, 1)
         println("\n[SUCCESS] Upload complete. Speed: ${String.format("%.2f", ((totalSize - offset) / 1024.0) / (duration / 1000.0))} KB/s")
         
-        receiveWithAck(3000) // Ждем финальный статус SUCCESS от сервера
+        receiveWithAck(3000)
     }
 }

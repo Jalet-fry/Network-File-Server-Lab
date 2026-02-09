@@ -5,10 +5,13 @@ import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.SocketTimeoutException
+import java.util.*
 
 class ReliableUdp(private val socket: DatagramSocket) {
     private var seqNum = 0
     private val buffer = ByteArray(Constants.UDP_PACKET_SIZE + 10)
+    // Очередь для хранения команд, пришедших во время ожидания ACK
+    private val commandQueue: Queue<UdpPacket> = LinkedList()
 
     fun getSeqNum(): Int = seqNum
 
@@ -29,14 +32,14 @@ class ReliableUdp(private val socket: DatagramSocket) {
     }
 
     fun receive(timeout: Int = 0): UdpPacket? {
+        // Сначала проверяем, нет ли отложенных команд
+        if (commandQueue.isNotEmpty()) return commandQueue.poll()
+
         val packet = DatagramPacket(buffer, buffer.size)
         return try {
             socket.soTimeout = timeout
             socket.receive(packet)
-            val type = packet.data[0]
-            val seq = readInt(packet.data, 1)
-            val payload = packet.data.copyOfRange(5, packet.length)
-            UdpPacket(type, seq, payload, packet.address, packet.port)
+            parsePacket(packet)
         } catch (e: Exception) {
             null
         }
@@ -51,8 +54,7 @@ class ReliableUdp(private val socket: DatagramSocket) {
 
     private fun retrySend(packet: DatagramPacket, seq: Int) {
         var attempts = 0
-        // Для данных используем очень короткий таймаут, чтобы не тормозить
-        val timeout = if (packet.data[0] == 0.toByte()) 100 else 1000
+        val timeout = if (packet.data[0] == 0.toByte()) 200 else 1000
         while (attempts < Constants.MAX_RETRIES) {
             try {
                 socket.send(packet)
@@ -60,25 +62,38 @@ class ReliableUdp(private val socket: DatagramSocket) {
             } catch (e: Exception) {}
             attempts++
         }
-        // Не бросаем исключение для пакетов данных, чтобы не ронять клиент
         if (packet.data[0] == 2.toByte()) throw IOException("UDP Command Timeout")
     }
 
     fun waitForAck(expectedSeq: Int, timeout: Int): Boolean {
-        val ackBuf = ByteArray(10)
+        val ackBuf = ByteArray(Constants.UDP_PACKET_SIZE + 10)
         val ackPacket = DatagramPacket(ackBuf, ackBuf.size)
         val start = System.currentTimeMillis()
         try {
             while (System.currentTimeMillis() - start < timeout) {
-                socket.soTimeout = 50 // Очень быстрый опрос
-                socket.receive(ackPacket)
-                val receivedSeq = readInt(ackBuf, 1)
-                if (ackBuf[0] == 1.toByte() && (expectedSeq == -1 || receivedSeq >= expectedSeq)) {
-                    return true
+                socket.soTimeout = 100
+                try {
+                    socket.receive(ackPacket)
+                    val p = parsePacket(ackPacket)
+                    if (p.type == 1.toByte() && (expectedSeq == -1 || p.seq >= expectedSeq)) {
+                        return true
+                    } else if (p.type == 2.toByte()) {
+                        // Если пришла команда вместо ACK - сохраняем её!
+                        commandQueue.add(p)
+                    }
+                } catch (e: SocketTimeoutException) {
+                    continue
                 }
             }
         } catch (e: Exception) {}
         return false
+    }
+
+    private fun parsePacket(p: DatagramPacket): UdpPacket {
+        val type = p.data[0]
+        val seq = readInt(p.data, 1)
+        val payload = p.data.copyOfRange(5, p.length)
+        return UdpPacket(type, seq, payload, p.address, p.port)
     }
 
     private fun writeInt(buf: ByteArray, offset: Int, v: Int) {
