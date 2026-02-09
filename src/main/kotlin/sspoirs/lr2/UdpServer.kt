@@ -11,10 +11,9 @@ class UdpServer(private val port: Int) {
     private val reliableUdp = ReliableUdp(socket)
 
     fun start() {
-        println("[UDP SERVER v2.7] Listening on port $port...")
+        println("[UDP SERVER v2.8] Listening on port $port...")
         while (true) {
             try {
-                // receive(0) вытягивает отложенные команды из очереди в ReliableUdp
                 val packet = reliableUdp.receive(0) ?: continue 
                 if (packet.type == 2.toByte()) {
                     reliableUdp.sendAck(packet.seq, packet.address, packet.port)
@@ -68,47 +67,40 @@ class UdpServer(private val port: Int) {
             raf.seek(offset)
             var sent = 0L
             val buffer = ByteArray(Constants.UDP_PACKET_SIZE)
-            val windowSize = 80 // Оптимальный размер окна для реальной сети
+            val windowSize = 100 // Окно из 100 пакетов для скорости
 
             while (sent < remaining) {
+                val windowStartSeq = reliableUdp.getSeqNum()
                 val windowStartPos = raf.filePointer
-                var lastSeq = 0
+                var lastSeqInWindow = 0
                 
-                // 1. Отправляем окно
+                // Шлем пачку без остановок
                 for (i in 0 until windowSize) {
                     val read = raf.read(buffer)
                     if (read <= 0) break
-                    lastSeq = reliableUdp.getSeqNum()
+                    lastSeqInWindow = reliableUdp.getSeqNum()
                     reliableUdp.send(0, buffer.copyOfRange(0, read), address, port, requireAck = false)
                     sent += read
                     if (sent >= remaining) break
                 }
 
-                // 2. Ждем подтверждение с ПОВТОРАМИ (Retries для окна)
-                var windowAcked = false
-                for (attempt in 1..3) {
-                    if (reliableUdp.waitForAck(lastSeq, 1500)) {
-                        windowAcked = true
-                        break
+                // Ждем ACK для всей пачки (Кумулятивно)
+                // Если пришел ACK >= windowStartSeq, значит мы продвинулись вперед
+                if (!reliableUdp.waitForAck(windowStartSeq, 2000)) {
+                    println("[UDP] Packet loss, retrying window from seq $windowStartSeq")
+                    raf.seek(windowStartPos)
+                    sent = windowStartPos - offset
+                    // Если даже после ретрая глухо - клиент отвалился
+                    if (!reliableUdp.waitForAck(-1, 1000)) {
+                        println("[UDP] Client timed out. Ready for new commands.")
+                        return 
                     }
-                    if (sent < remaining) {
-                        println("[UDP] Window loss, retrying window from seq $lastSeq (Attempt $attempt/3)")
-                        // Перематываем файл назад для повторной отправки окна
-                        raf.seek(windowStartPos)
-                        // Сбрасываем sent на позицию до этого окна
-                        sent = windowStartPos - offset
-                    }
-                }
-
-                if (!windowAcked && sent < remaining) {
-                    println("[UDP] Client $address stopped responding. Aborting.")
-                    return
                 }
             }
         }
         val duration = Math.max(System.currentTimeMillis() - start, 1)
         val speed = (remaining / 1024.0) / (duration / 1000.0)
-        println("[UDP] Download complete. Speed: ${String.format("%.2f", speed)} KB/s")
+        println("[UDP] Download complete for $name. Speed: ${String.format("%.2f", speed)} KB/s")
     }
 
     private fun handleUpload(name: String?, size: Long, offset: Long, addr: InetAddress, port: Int) {
@@ -122,8 +114,8 @@ class UdpServer(private val port: Int) {
             while (totalReceived < toReceive) {
                 val p = reliableUdp.receive(5000) ?: break 
                 if (p.type == 0.toByte()) {
-                    // Кумулятивный ACK: раз в 32 пакета
-                    if (p.seq % 32 == 0 || totalReceived + p.payload.size >= toReceive) {
+                    // ACK раз в 50 пакетов для скорости
+                    if (p.seq % 50 == 0 || totalReceived + p.payload.size >= toReceive) {
                         reliableUdp.sendAck(p.seq, p.address, p.port)
                     }
                     raf.write(p.payload)

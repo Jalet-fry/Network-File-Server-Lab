@@ -152,11 +152,10 @@ class UdpClient(private val host: String, private val port: Int) {
         var packetCount = 0
 
         while (received < length) {
-            // Ждем пакет данных. Если тишина 5 сек - прерываемся
             val p = reliableUdp.receive(5000) ?: break 
             if (p.type == 0.toByte()) {
                 packetCount++
-                // КУМУЛЯТИВНЫЙ ACK: шлем раз в 50 пакетов для скорости
+                // КУМУЛЯТИВНЫЙ ACK: шлем раз в 50 пакетов для скорости (ЛР 2)
                 if (packetCount % 50 == 0 || received + p.payload.size >= length) {
                     reliableUdp.sendAck(p.seq, p.address, p.port)
                 }
@@ -176,7 +175,7 @@ class UdpClient(private val host: String, private val port: Int) {
         if (received >= length) {
             println("\n[SUCCESS] Download finished. Speed: ${String.format("%.2f", (received / 1024.0) / (duration / 1000.0))} KB/s")
         } else {
-            println("\n[ERROR] Download interrupted. Received only $received / $length bytes.")
+            println("\n[ERROR] Download interrupted. Received $received / $length bytes.")
         }
     }
 
