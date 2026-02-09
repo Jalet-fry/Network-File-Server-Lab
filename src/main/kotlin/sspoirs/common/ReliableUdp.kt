@@ -9,13 +9,17 @@ import java.util.*
 
 class ReliableUdp(private val socket: DatagramSocket) {
     private var seqNum = 0
-    private val buffer = ByteArray(Constants.UDP_PACKET_SIZE + 10)
-    private val commandQueue: Queue<UdpPacket> = LinkedList()
+    private val buffer = ByteArray(Constants.UDP_PACKET_SIZE + 100)
+    private val incomingQueue: Queue<UdpPacket> = LinkedList()
 
     fun getSeqNum(): Int = seqNum
     
     fun advanceSeq(delta: Int) {
         seqNum += delta
+    }
+
+    fun clearQueue() {
+        incomingQueue.clear()
     }
 
     fun send(type: Byte, payload: ByteArray, address: InetAddress, port: Int, requireAck: Boolean = true, forcedSeq: Int = -1) {
@@ -36,12 +40,14 @@ class ReliableUdp(private val socket: DatagramSocket) {
     }
 
     fun receive(timeout: Int = 0): UdpPacket? {
-        if (commandQueue.isNotEmpty()) return commandQueue.poll()
+        if (incomingQueue.isNotEmpty()) return incomingQueue.poll()
+
         val packet = DatagramPacket(buffer, buffer.size)
         return try {
             socket.soTimeout = timeout
             socket.receive(packet)
-            parsePacket(packet)
+            val p = parsePacket(packet)
+            if (p.type == 1.toByte()) receive(timeout) else p
         } catch (e: Exception) { null }
     }
 
@@ -54,7 +60,7 @@ class ReliableUdp(private val socket: DatagramSocket) {
 
     private fun retrySend(packet: DatagramPacket, seq: Int) {
         var attempts = 0
-        val timeout = if (packet.data[0] == 0.toByte()) 200 else 1000
+        val timeout = if (packet.data[0] == 0.toByte()) 300 else 2000
         while (attempts < Constants.MAX_RETRIES) {
             try {
                 socket.send(packet)
@@ -66,7 +72,7 @@ class ReliableUdp(private val socket: DatagramSocket) {
     }
 
     fun waitForAck(expectedSeq: Int, timeout: Int): Boolean {
-        val ackBuf = ByteArray(Constants.UDP_PACKET_SIZE + 10)
+        val ackBuf = ByteArray(Constants.UDP_PACKET_SIZE + 100)
         val ackPacket = DatagramPacket(ackBuf, ackBuf.size)
         val start = System.currentTimeMillis()
         try {
@@ -75,10 +81,12 @@ class ReliableUdp(private val socket: DatagramSocket) {
                 try {
                     socket.receive(ackPacket)
                     val p = parsePacket(ackPacket)
-                    if (p.type == 1.toByte() && (expectedSeq == -1 || p.seq >= expectedSeq)) {
-                        return true
-                    } else if (p.type == 2.toByte()) {
-                        commandQueue.add(p)
+                    if (p.type == 1.toByte()) {
+                        if (expectedSeq == -1 || p.seq >= expectedSeq) return true
+                    } else {
+                        // Если пришла не ACK, а команда - подтверждаем и в очередь
+                        sendAck(p.seq, p.address, p.port)
+                        incomingQueue.add(p)
                     }
                 } catch (e: SocketTimeoutException) { continue }
             }
