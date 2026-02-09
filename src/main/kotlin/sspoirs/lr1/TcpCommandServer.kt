@@ -54,7 +54,6 @@ class TcpCommandServer(private val port: Int) {
         val client = serverChannel.accept()
         client.configureBlocking(false)
         client.socket().keepAlive = true
-        // ВАЖНО: oobInline = false, чтобы байт прогресса не портил файл!
         client.socket().oobInline = false 
         client.register(selector, SelectionKey.OP_READ, ClientSession(client.remoteAddress.toString()))
         println("[SERVER] New connection from ${client.remoteAddress}")
@@ -157,7 +156,8 @@ class TcpCommandServer(private val port: Int) {
     }
 
     private fun handleUploadChunk(session: ClientSession, channel: SocketChannel, key: SelectionKey) {
-        val buffer = ByteBuffer.allocate(Math.min(Constants.BUFFER_SIZE.toLong(), session.fileRemaining).toInt())
+        val bufferSize = Math.min(Constants.BUFFER_SIZE.toLong(), session.fileRemaining).toInt()
+        val buffer = ByteBuffer.allocate(bufferSize)
         val read = try { channel.read(buffer) } catch (e: IOException) { -1 }
         
         if (read > 0) {
@@ -248,7 +248,7 @@ class TcpCommandServer(private val port: Int) {
 
         fun extractLine(): String? {
             val data = inputAccumulator.toByteArray()
-            val idx = data.indexOf('\n'.toByte())
+            val idx = data.indexOf('\n'.code.toByte())
             if (idx == -1) return null
             
             val line = String(data, 0, idx, Charsets.UTF_8).trim()
