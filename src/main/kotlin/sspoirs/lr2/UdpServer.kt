@@ -7,11 +7,14 @@ import java.net.InetAddress
 import java.time.LocalDateTime
 
 class UdpServer(private val port: Int) {
-    private val socket = DatagramSocket(port)
+    private val socket = DatagramSocket(port).apply {
+        receiveBufferSize = 1024 * 1024 // 1MB буфер
+        sendBufferSize = 1024 * 1024
+    }
     private val reliableUdp = ReliableUdp(socket)
 
     fun start() {
-        println("[UDP SERVER v2.8] Listening on port $port...")
+        println("[UDP SERVER v2.9] Listening on port $port...")
         while (true) {
             try {
                 val packet = reliableUdp.receive(0) ?: continue 
@@ -65,42 +68,38 @@ class UdpServer(private val port: Int) {
         val start = System.currentTimeMillis()
         RandomAccessFile(file, "r").use { raf ->
             raf.seek(offset)
-            var sent = 0L
+            var sentBytes = 0L
             val buffer = ByteArray(Constants.UDP_PACKET_SIZE)
-            val windowSize = 100 // Окно из 100 пакетов для скорости
+            val windowSize = 100 
 
-            while (sent < remaining) {
-                val windowStartSeq = reliableUdp.getSeqNum()
+            while (sentBytes < remaining) {
                 val windowStartPos = raf.filePointer
-                var lastSeqInWindow = 0
+                val windowStartSeq = reliableUdp.getSeqNum()
+                var lastSeq = 0
                 
-                // Шлем пачку без остановок
+                // Шлем окно
+                var currentWindowSize = 0L
                 for (i in 0 until windowSize) {
                     val read = raf.read(buffer)
                     if (read <= 0) break
-                    lastSeqInWindow = reliableUdp.getSeqNum()
+                    lastSeq = reliableUdp.getSeqNum()
                     reliableUdp.send(0, buffer.copyOfRange(0, read), address, port, requireAck = false)
-                    sent += read
-                    if (sent >= remaining) break
+                    currentWindowSize += read
+                    if (windowStartPos + currentWindowSize >= totalSize) break
                 }
 
-                // Ждем ACK для всей пачки (Кумулятивно)
-                // Если пришел ACK >= windowStartSeq, значит мы продвинулись вперед
-                if (!reliableUdp.waitForAck(windowStartSeq, 2000)) {
-                    println("[UDP] Packet loss, retrying window from seq $windowStartSeq")
-                    raf.seek(windowStartPos)
-                    sent = windowStartPos - offset
-                    // Если даже после ретрая глухо - клиент отвалился
-                    if (!reliableUdp.waitForAck(-1, 1000)) {
-                        println("[UDP] Client timed out. Ready for new commands.")
-                        return 
-                    }
+                // Ждем ACK с ретраями
+                if (!reliableUdp.waitForAck(windowStartSeq, 1500)) {
+                    // Если нет ACK, мы НЕ прибавляем sentBytes, а просто повторим цикл
+                    println("[UDP] Window loss at seq $windowStartSeq, retrying...")
+                    raf.seek(windowStartPos) // Перемотка назад
+                    continue
                 }
+                sentBytes += currentWindowSize
             }
         }
         val duration = Math.max(System.currentTimeMillis() - start, 1)
-        val speed = (remaining / 1024.0) / (duration / 1000.0)
-        println("[UDP] Download complete for $name. Speed: ${String.format("%.2f", speed)} KB/s")
+        println("[UDP] Download complete. Speed: ${String.format("%.2f", (remaining / 1024.0) / (duration / 1000.0))} KB/s")
     }
 
     private fun handleUpload(name: String?, size: Long, offset: Long, addr: InetAddress, port: Int) {
@@ -114,7 +113,6 @@ class UdpServer(private val port: Int) {
             while (totalReceived < toReceive) {
                 val p = reliableUdp.receive(5000) ?: break 
                 if (p.type == 0.toByte()) {
-                    // ACK раз в 50 пакетов для скорости
                     if (p.seq % 50 == 0 || totalReceived + p.payload.size >= toReceive) {
                         reliableUdp.sendAck(p.seq, p.address, p.port)
                     }
@@ -124,8 +122,7 @@ class UdpServer(private val port: Int) {
             }
         }
         val duration = Math.max(System.currentTimeMillis() - start, 1)
-        val speed = (totalReceived / 1024.0) / (duration / 1000.0)
         reliableUdp.send(2, "SUCCESS".toByteArray(), addr, port)
-        println("[UDP] Upload finished for $name. Speed: ${String.format("%.2f", speed)} KB/s")
+        println("[UDP] Upload finished. Speed: ${String.format("%.2f", (totalReceived / 1024.0) / (duration / 1000.0))} KB/s")
     }
 }
