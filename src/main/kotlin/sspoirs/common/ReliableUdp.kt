@@ -59,12 +59,11 @@ class ReliableUdp(private val socket: DatagramSocket) {
             } catch (e: Exception) {}
             attempts++
         }
-        // Для команд (seq=0 или тип 2) это критично, для данных — нет
         if (packet.data[0] == 2.toByte()) throw IOException("UDP Command Timeout")
     }
 
     fun waitForAck(expectedSeq: Int, timeout: Int): Boolean {
-        val ackBuf = ByteArray(5)
+        val ackBuf = ByteArray(10) // Увеличен размер для безопасности
         val ackPacket = DatagramPacket(ackBuf, ackBuf.size)
         val start = System.currentTimeMillis()
         try {
@@ -72,7 +71,6 @@ class ReliableUdp(private val socket: DatagramSocket) {
                 socket.soTimeout = timeout / 2
                 socket.receive(ackPacket)
                 val receivedSeq = readInt(ackBuf, 1)
-                // Кумулятивный ACK: если получили номер >= ожидаемого, всё ок
                 if (ackBuf[0] == 1.toByte() && (expectedSeq == -1 || receivedSeq >= expectedSeq)) {
                     return true
                 }
@@ -97,4 +95,3 @@ class ReliableUdp(private val socket: DatagramSocket) {
 
     data class UdpPacket(val type: Byte, val seq: Int, val payload: ByteArray, val address: InetAddress, val port: Int)
 }
-```
