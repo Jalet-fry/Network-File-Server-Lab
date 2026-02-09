@@ -18,18 +18,29 @@ class ReliableUdp(private val socket: DatagramSocket) {
     
     fun advanceSeq(delta: Int) { seqNum += delta }
 
+    // ГЛУБОКАЯ ОЧИСТКА: выметает мусор из системного буфера сокета
     fun clearQueue() {
         incomingQueue.clear()
+        val oldTimeout = socket.soTimeout
+        try {
+            socket.soTimeout = 1 // Мгновенный таймаут
+            val dummyPacket = DatagramPacket(buffer, buffer.size)
+            while (true) {
+                socket.receive(dummyPacket) // Читаем и выбрасываем
+            }
+        } catch (e: Exception) {
+            // Буфер пуст
+        } finally {
+            socket.soTimeout = oldTimeout
+        }
     }
 
-    // Простая отправка (для пачек данных в окне)
     fun sendFast(type: Byte, payload: ByteArray, address: InetAddress, port: Int, forcedSeq: Int = -1) {
         val s = if (forcedSeq != -1) forcedSeq else seqNum++
         val data = buildPacket(type, s, payload)
         socket.send(DatagramPacket(data, data.size, address, port))
     }
 
-    // Надежная отправка (для команд и ответов)
     fun sendReliable(type: Byte, payload: ByteArray, address: InetAddress, port: Int) {
         val s = seqNum++
         val data = buildPacket(type, s, payload)
@@ -46,7 +57,6 @@ class ReliableUdp(private val socket: DatagramSocket) {
 
     fun receive(timeout: Int = 0): UdpPacket? {
         while (true) {
-            // Если в очереди есть пакеты (полученные во время ожидания ACK) - отдаем их
             if (incomingQueue.isNotEmpty()) return incomingQueue.poll()
 
             val packet = DatagramPacket(buffer, buffer.size)
@@ -55,10 +65,9 @@ class ReliableUdp(private val socket: DatagramSocket) {
                 socket.receive(packet)
                 val p = parsePacket(packet)
                 
-                if (p.type == 1.toByte()) continue // Пропускаем ACK
+                // Игнорируем ACK (тип 1) в обычном приеме
+                if (p.type == 1.toByte()) continue 
                 
-                // КРИТИЧЕСКИЙ ФИКС: Любой полезный пакет (0 или 2) нужно подтвердить немедленно!
-                sendAck(p.seq, p.address, p.port)
                 return p
             } catch (e: Exception) { return null }
         }
@@ -82,11 +91,9 @@ class ReliableUdp(private val socket: DatagramSocket) {
                 val p = parsePacket(ackPacket)
                 
                 if (p.type == 1.toByte()) {
-                    // Кумулятивный ACK: успех если номер >= ожидаемого
                     if (expectedSeq == -1 || p.seq >= expectedSeq) return true
                 } else {
-                    // ПРИШЛА КОМАНДА ИЛИ ДАННЫЕ ВМЕСТО ACK: 
-                    // подтверждаем их и сохраняем в очередь, чтобы не потерять!
+                    // Если пришла команда или данные вместо ACK - подтверждаем и в очередь
                     sendAck(p.seq, p.address, p.port)
                     incomingQueue.add(p)
                 }
