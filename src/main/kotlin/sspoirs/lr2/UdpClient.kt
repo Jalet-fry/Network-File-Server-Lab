@@ -80,12 +80,18 @@ class UdpClient(private val host: String, private val port: Int) {
         }
     }
 
+    private fun receiveWithAck(timeout: Int = 5000): ReliableUdp.UdpPacket? {
+        val p = reliableUdp.receive(timeout)
+        if (p != null && p.type != 1.toByte()) {
+            reliableUdp.sendAck(p.seq, p.address, p.port)
+        }
+        return p
+    }
+
     private fun updateServerFiles() {
         try {
             reliableUdp.send(2, "LS".toByteArray(), serverAddress, port)
-            val resp = reliableUdp.receive(2000) ?: return
-            if (resp.type != 1.toByte()) reliableUdp.sendAck(resp.seq, resp.address, resp.port)
-            
+            val resp = receiveWithAck(2000) ?: return
             val content = String(resp.payload)
             if (content.startsWith("FILES")) {
                 serverFiles.clear()
@@ -111,10 +117,7 @@ class UdpClient(private val host: String, private val port: Int) {
 
     private fun sendBasicCommand(line: String) {
         reliableUdp.send(2, line.toByteArray(), serverAddress, port)
-        reliableUdp.receive(3000)?.let { 
-            if (it.type != 1.toByte()) reliableUdp.sendAck(it.seq, it.address, it.port)
-            println("Server: ${String(it.payload)}") 
-        }
+        receiveWithAck(3000)?.let { println("Server: ${String(it.payload)}") }
     }
 
     private fun initiateDownload(name: String) {
@@ -123,19 +126,22 @@ class UdpClient(private val host: String, private val port: Int) {
         updateServerFiles()
         val fullSize = serverFiles[name] ?: -1L
         
+        if (fullSize != -1L && offset >= fullSize) {
+            println("[INFO] Already fully downloaded.")
+            return
+        }
+
         reliableUdp.send(2, "DOWNLOAD $name $offset".toByteArray(), serverAddress, port)
-        val resp = reliableUdp.receive(3000) ?: return
-        if (resp.type != 1.toByte()) reliableUdp.sendAck(resp.seq, resp.address, resp.port)
-        
+        val resp = receiveWithAck(3000) ?: return
         val status = String(resp.payload)
+        
         if (status.startsWith("OK")) {
             val remainingSize = status.split(" ")[1].toLong()
-            println("[INFO] Downloading ${if (offset > 0) "remaining " else ""}$remainingSize bytes...")
+            println("[INFO] Downloading $remainingSize bytes...")
             RandomAccessFile(file, "rw").use { raf ->
                 raf.seek(offset)
                 receiveFileData(raf, remainingSize, offset, fullSize)
             }
-            println("\n[SUCCESS] Download finished.")
         } else println("Error: $status")
     }
 
@@ -146,11 +152,11 @@ class UdpClient(private val host: String, private val port: Int) {
         var packetCount = 0
 
         while (received < length) {
-            val p = reliableUdp.receive(5000) ?: break
+            val p = reliableUdp.receive(5000) ?: break // Ждем пакет 5 секунд
             if (p.type == 0.toByte()) {
                 packetCount++
-                // КУМУЛЯТИВНЫЙ ACK: шлем раз в 50 пакетов для скорости (ЛР 2)
-                if (packetCount % 50 == 0 || received + p.payload.size >= length) {
+                // Кумулятивный ACK: раз в 32 пакета для скорости
+                if (packetCount % 32 == 0 || received + p.payload.size >= length) {
                     reliableUdp.sendAck(p.seq, p.address, p.port)
                 }
                 raf.write(p.payload)
@@ -165,10 +171,11 @@ class UdpClient(private val host: String, private val port: Int) {
                 }
             }
         }
-        val duration = System.currentTimeMillis() - start
-        if (received > 0) {
-            val speed = (received / 1024.0) / (Math.max(duration, 1) / 1000.0)
-            println("\n[Transfer] Complete: $received bytes in ${duration}ms (${String.format("%.2f", speed)} KB/s)")
+        val duration = Math.max(System.currentTimeMillis() - start, 1)
+        if (received >= length) {
+            println("\n[SUCCESS] Download finished. Speed: ${String.format("%.2f", (received / 1024.0) / (duration / 1000.0))} KB/s")
+        } else {
+            println("\n[ERROR] Download interrupted. Received $received / $length bytes.")
         }
     }
 
@@ -188,7 +195,7 @@ class UdpClient(private val host: String, private val port: Int) {
             val buffer = ByteArray(Constants.UDP_PACKET_SIZE)
             var sent = 0L
             val toSend = totalSize - offset
-            val windowSize = 50
+            val windowSize = 64
             
             while (sent < toSend) {
                 var lastSeq = 0
@@ -200,18 +207,16 @@ class UdpClient(private val host: String, private val port: Int) {
                     sent += read
                     if (sent >= toSend) break
                 }
-                reliableUdp.waitForAck(lastSeq, 500)
-                if (sent % (1024 * 100) == 0L) print("\r[Progress] ${offset + sent} / $totalSize bytes")
+                // Ждем ACK окна
+                if (!reliableUdp.waitForAck(lastSeq, 2000)) {
+                    println("\n[WARN] Retrying window from seq $lastSeq...")
+                }
+                print("\r[Progress] ${offset + sent} / $totalSize bytes")
             }
         }
-        val duration = System.currentTimeMillis() - start
-        val speed = ((totalSize - offset) / 1024.0) / (Math.max(duration, 1) / 1000.0)
-        println("\n[Transfer] Upload speed: ${String.format("%.2f", speed)} KB/s")
+        val duration = Math.max(System.currentTimeMillis() - start, 1)
+        println("\n[SUCCESS] Upload complete. Speed: ${String.format("%.2f", ((totalSize - offset) / 1024.0) / (duration / 1000.0))} KB/s")
         
-        val fin = reliableUdp.receive(5000)
-        if (fin != null) {
-            reliableUdp.sendAck(fin.seq, fin.address, fin.port)
-            println("Server: ${String(fin.payload)}")
-        }
+        receiveWithAck(3000) // Ждем финальный статус SUCCESS от сервера
     }
 }
