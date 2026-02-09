@@ -51,7 +51,8 @@ class ReliableUdp(private val socket: DatagramSocket) {
 
     private fun retrySend(packet: DatagramPacket, seq: Int) {
         var attempts = 0
-        val timeout = Constants.UDP_TIMEOUT.toInt()
+        // Для данных используем очень короткий таймаут, чтобы не тормозить
+        val timeout = if (packet.data[0] == 0.toByte()) 100 else 1000
         while (attempts < Constants.MAX_RETRIES) {
             try {
                 socket.send(packet)
@@ -59,16 +60,17 @@ class ReliableUdp(private val socket: DatagramSocket) {
             } catch (e: Exception) {}
             attempts++
         }
+        // Не бросаем исключение для пакетов данных, чтобы не ронять клиент
         if (packet.data[0] == 2.toByte()) throw IOException("UDP Command Timeout")
     }
 
     fun waitForAck(expectedSeq: Int, timeout: Int): Boolean {
-        val ackBuf = ByteArray(10) // Увеличен размер для безопасности
+        val ackBuf = ByteArray(10)
         val ackPacket = DatagramPacket(ackBuf, ackBuf.size)
         val start = System.currentTimeMillis()
         try {
             while (System.currentTimeMillis() - start < timeout) {
-                socket.soTimeout = timeout / 2
+                socket.soTimeout = 50 // Очень быстрый опрос
                 socket.receive(ackPacket)
                 val receivedSeq = readInt(ackBuf, 1)
                 if (ackBuf[0] == 1.toByte() && (expectedSeq == -1 || receivedSeq >= expectedSeq)) {
