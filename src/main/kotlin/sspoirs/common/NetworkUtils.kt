@@ -13,8 +13,9 @@ object NetworkUtils {
             val byte = try { inputStream.read() } catch (e: IOException) { -1 }
             if (byte == -1) break
             hasData = true
-            if (byte == '\n'.toInt()) break
-            if (byte == '\r'.toInt()) continue
+            // Использование .code вместо .toInt() для чистоты логов
+            if (byte == '\n'.code) break
+            if (byte == '\r'.code) continue
             out.write(byte)
         }
         return if (!hasData) null else out.toString("UTF-8")

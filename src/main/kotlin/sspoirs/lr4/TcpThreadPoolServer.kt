@@ -7,70 +7,63 @@ import java.net.Socket
 import java.util.concurrent.*
 import java.util.concurrent.atomic.AtomicInteger
 
-/**
- * Параллельный сервер на базе пула потоков (ЛР №4, Вариант 5).
- * Соответствует требованиям динамического расширения и защиты accept.
- */
 class TcpThreadPoolServer(private val port: Int) {
     
-    // Используем SynchronousQueue для немедленного расширения до N_MAX,
-    // так как LinkedBlockingQueue (даже маленькая) откладывает создание потоков до заполнения очереди.
+    private val activeTasks = AtomicInteger(0)
+
+    // Вариант 5: Пул потоков с динамическим расширением
     private val executor = ThreadPoolExecutor(
-        Constants.THREAD_POOL_N_MIN,
-        Constants.THREAD_POOL_N_MAX,
-        Constants.IDLE_TIMEOUT_MS,
+        Constants.THREAD_POOL_N_MIN, // Nmin
+        Constants.THREAD_POOL_N_MAX, // Nmax
+        Constants.IDLE_TIMEOUT_MS,   // Таймаут завершения лишних потоков
         TimeUnit.MILLISECONDS,
-        SynchronousQueue<Runnable>(),
+        SynchronousQueue<Runnable>(), // SynchronousQueue заставляет пул расширяться немедленно
         ThreadPoolExecutor.AbortPolicy()
     ).apply {
-        // Условие *: Пул инициализируется начальным числом потоков Nmin
+        // Пул инициализируется начальным числом потоков Nmin
         prestartAllCoreThreads()
     }
 
-    private val activeConnections = AtomicInteger(0)
-
     fun start() {
         ServerSocket(port).use { serverSocket ->
-            println("TCP Thread Pool Server (Lab 4) started on port $port...")
-            println("Configuration: Nmin=${Constants.THREAD_POOL_N_MIN}, Nmax=${Constants.THREAD_POOL_N_MAX}, Timeout=${Constants.IDLE_TIMEOUT_MS}ms")
+            println("[SERVER v2.2] TCP Thread Pool Server (Lab 4) started on port $port")
+            println("[CONFIG] Nmin=${Constants.THREAD_POOL_N_MIN}, Nmax=${Constants.THREAD_POOL_N_MAX}, IdleTimeout=${Constants.IDLE_TIMEOUT_MS}ms")
 
             while (true) {
                 try {
-                    // Вариант 5: Параллельный вызов accept. 
-                    // Хотя ServerSocket.accept() в JVM нативен и потокобезопасен, 
-                    // в контексте учебной задачи синхронизация подчеркивает контроль за вызовом.
+                    // Защита accept через синхронизацию (требование ЛР4)
                     val clientSocket = synchronized(serverSocket) {
                         serverSocket.accept()
                     }
                     
-                    configureSocket(clientSocket)
+                    clientSocket.keepAlive = true
+                    // Увеличиваем таймаут, чтобы большие файлы не рвались
+                    clientSocket.soTimeout = 60000 
+                    
                     dispatchClient(clientSocket)
                 } catch (e: Exception) {
-                    println("Accept error: ${e.message}")
+                    println("[POOL ERROR] Accept error: ${e.message}")
                 }
             }
         }
     }
 
-    private fun configureSocket(socket: Socket) {
-        // Условие ЛР 1: SO_KEEPALIVE для контроля обрывов
-        socket.keepAlive = true
-    }
-
     private fun dispatchClient(socket: Socket) {
+        val addr = socket.remoteSocketAddress
         try {
             executor.execute {
-                val currentActive = activeConnections.incrementAndGet()
-                println("Client ${socket.remoteSocketAddress} handled. Active: $currentActive, Threads: ${executor.poolSize}")
+                activeTasks.incrementAndGet()
+                println("[POOL] Client $addr connected. Active Tasks: ${activeTasks.get()}, Pool Size: ${executor.poolSize}")
+                
                 try {
                     TcpSessionHandler(socket).run()
                 } finally {
-                    activeConnections.decrementAndGet()
-                    println("Client disconnected. Active: ${activeConnections.get()}")
+                    activeTasks.decrementAndGet()
+                    println("[POOL] Client $addr disconnected. Active Tasks: ${activeTasks.get()}, Pool Size: ${executor.poolSize}")
                 }
             }
         } catch (e: RejectedExecutionException) {
-            println("Rejected: Max capacity ($activeConnections) reached. Terminating connection.")
+            println("[POOL REJECTED] Max capacity reached for $addr")
             try { socket.close() } catch (ex: Exception) {}
         }
     }

@@ -11,19 +11,17 @@ class UdpServer(private val port: Int) {
     private val reliableUdp = ReliableUdp(socket)
 
     fun start() {
-        println("UDP Server listening on port $port...")
+        println("[UDP SERVER v2.2] Listening on port $port...")
         while (true) {
             try {
-                handleNextPacket()
-            } catch (e: Exception) { println("Error: ${e.message}") }
-        }
-    }
-
-    private fun handleNextPacket() {
-        val packet = reliableUdp.receive() ?: return
-        if (packet.type == 2.toByte()) { // Command type
-            reliableUdp.sendAck(packet.seq, packet.address, packet.port)
-            processCommand(String(packet.payload), packet.address, packet.port)
+                val packet = reliableUdp.receive(0) ?: continue // Бесконечное ожидание команд
+                if (packet.type == 2.toByte()) { // Тип: Команда
+                    reliableUdp.sendAck(packet.seq, packet.address, packet.port)
+                    processCommand(String(packet.payload), packet.address, packet.port)
+                }
+            } catch (e: Exception) {
+                println("[UDP ERROR] ${e.message}")
+            }
         }
     }
 
@@ -32,69 +30,64 @@ class UdpServer(private val port: Int) {
         val cmd = Command.fromString(parts[0])
         val args = parts.drop(1)
 
+        println("[UDP] Command from $address: $line")
+
         when (cmd) {
-            Command.ECHO -> sendResponse(args.joinToString(" "), address, port)
-            Command.TIME -> sendResponse(LocalDateTime.now().toString(), address, port)
+            Command.ECHO -> reliableUdp.send(2, args.joinToString(" ").toByteArray(), address, port)
+            Command.TIME -> reliableUdp.send(2, LocalDateTime.now().toString().toByteArray(), address, port)
             Command.LIST -> handleList(address, port)
             Command.DOWNLOAD -> handleDownload(args.getOrNull(0), args.getOrNull(1)?.toLong() ?: 0, address, port)
             Command.UPLOAD -> handleUpload(args.getOrNull(0), args.getOrNull(1)?.toLong() ?: 0, args.getOrNull(2)?.toLong() ?: 0, address, port)
-            else -> sendResponse("Unknown command", address, port)
+            else -> reliableUdp.send(2, "Unknown command".toByteArray(), address, port)
         }
-    }
-
-    private fun sendResponse(text: String, address: InetAddress, port: Int) {
-        reliableUdp.send(2, text.toByteArray(), address, port)
     }
 
     private fun handleList(address: InetAddress, port: Int) {
         val files = File(Constants.SERVER_STORAGE).listFiles()?.filter { it.isFile }
             ?.joinToString(";") { "${it.name}(${it.length()}b)" } ?: "No files"
-        sendResponse("FILES $files", address, port)
+        reliableUdp.send(2, "FILES $files".toByteArray(), address, port)
     }
 
     private fun handleDownload(name: String?, offset: Long, address: InetAddress, port: Int) {
         val file = File(Constants.SERVER_STORAGE, name ?: return)
-        if (!file.exists()) return sendResponse("ERROR: Not found", address, port)
+        if (!file.exists()) {
+            reliableUdp.send(2, "ERROR: Not found".toByteArray(), address, port)
+            return
+        }
 
         val remaining = file.length() - offset
-        sendResponse("OK $remaining", address, port)
+        reliableUdp.send(2, "OK $remaining".toByteArray(), address, port)
         
         RandomAccessFile(file, "r").use { raf ->
             raf.seek(offset)
-            sendFileData(raf, remaining, address, port)
+            var sent = 0L
+            val buffer = ByteArray(Constants.UDP_PACKET_SIZE)
+            while (sent < remaining) {
+                val read = raf.read(buffer)
+                if (read <= 0) break
+                // Отправляем как данные (тип 0)
+                reliableUdp.send(0, buffer.copyOfRange(0, read), address, port)
+                sent += read
+            }
         }
-    }
-
-    private fun sendFileData(raf: RandomAccessFile, totalSize: Long, addr: InetAddress, port: Int) {
-        var sent = 0L
-        val windowSize = 5 
-        while (sent < totalSize) {
-            val chunk = ByteArray(Constants.UDP_PACKET_SIZE)
-            val read = raf.read(chunk)
-            if (read <= 0) break
-            reliableUdp.send(0, chunk.copyOfRange(0, read), addr, port)
-            sent += read
-        }
+        println("[UDP] Download finished for $name")
     }
 
     private fun handleUpload(name: String?, size: Long, offset: Long, addr: InetAddress, port: Int) {
         val file = File(Constants.SERVER_STORAGE, name ?: return)
+        var received = 0L
         RandomAccessFile(file, "rw").use { raf ->
             raf.seek(offset)
-            receiveFileData(raf, size)
-        }
-        sendResponse("SUCCESS", addr, port)
-    }
-
-    private fun receiveFileData(raf: RandomAccessFile, totalSize: Long) {
-        var received = 0L
-        while (received < totalSize) {
-            val p = reliableUdp.receive() ?: continue
-            if (p.type == 0.toByte()) {
-                reliableUdp.sendAck(p.seq, p.address, p.port)
-                raf.write(p.payload)
-                received += p.payload.size
+            while (received < size) {
+                val p = reliableUdp.receive(5000) ?: break // Ждем данные 5 сек
+                if (p.type == 0.toByte()) {
+                    reliableUdp.sendAck(p.seq, p.address, p.port)
+                    raf.write(p.payload)
+                    received += p.payload.size
+                }
             }
         }
+        reliableUdp.send(2, "SUCCESS".toByteArray(), addr, port)
+        println("[UDP] Upload complete for $name")
     }
 }
