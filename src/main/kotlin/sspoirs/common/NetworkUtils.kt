@@ -40,13 +40,6 @@ object NetworkUtils {
             output.write(buffer, 0, read)
             total += read
             
-            // ЛАЙФХАК ДЛЯ СДАЧИ (ЛР 2):
-            // Увеличиваем задержку до 5мс на каждые 8КБ для TCP.
-            // Это обеспечит разрыв в скорости > 1.5x по сравнению с UDP.
-            if (socket != null) {
-                try { Thread.sleep(5) } catch (e: Exception) {}
-            }
-
             val now = System.currentTimeMillis()
             if (now - lastPrintTime > 300) {
                 val currentTotal = offset + total

@@ -34,7 +34,6 @@ class UdpClient(private val host: String, private val port: Int) {
                 ))
                 .build()
         } catch (e: Exception) {
-            println("[WARN] JLine failed, using fallback scanner.")
             useFallbackScanner = true
         }
 
@@ -149,17 +148,24 @@ class UdpClient(private val host: String, private val port: Int) {
         var received = 0L
         val start = System.currentTimeMillis()
         var lastPrint = 0L
-        var packetCount = 0
+        var lastPSeq = -1
 
         while (received < length) {
             val p = reliableUdp.receive(5000) ?: break 
             if (p.type == 0.toByte()) {
-                packetCount++
-                if (packetCount % 50 == 0 || received + p.payload.size >= length) {
+                // Если получили дубликат - просто шлем ACK еще раз и не пишем в файл
+                if (p.seq <= lastPSeq) {
+                    reliableUdp.sendAck(p.seq, p.address, p.port)
+                    continue
+                }
+                
+                // Кумулятивный ACK раз в 50 пакетов или для самого последнего
+                if (p.seq % 50 == 0 || received + p.payload.size >= length) {
                     reliableUdp.sendAck(p.seq, p.address, p.port)
                 }
                 raf.write(p.payload)
                 received += p.payload.size
+                lastPSeq = p.seq
                 
                 val now = System.currentTimeMillis()
                 if (now - lastPrint > 300) {
@@ -170,6 +176,15 @@ class UdpClient(private val host: String, private val port: Int) {
                 }
             }
         }
+        
+        // КРИТИЧЕСКИЙ ФИКС: Прощальный ACK, чтобы сервер вышел из цикла
+        if (received >= length) {
+            repeat(3) { 
+                reliableUdp.sendAck(lastPSeq, serverAddress, port)
+                Thread.sleep(10)
+            }
+        }
+
         val duration = Math.max(System.currentTimeMillis() - start, 1)
         if (received >= length) {
             val speed = (received / 1024.0) / (duration / 1000.0)
@@ -212,9 +227,10 @@ class UdpClient(private val host: String, private val port: Int) {
             }
         }
         val duration = Math.max(System.currentTimeMillis() - start, 1)
-        val speed = ((totalSize - offset) / 1024.0) / (duration / 1000.0)
-        println("\n[SUCCESS] Upload finished. Complete: ${totalSize - offset} bytes in ${duration}ms (${String.format("%.2f", speed)} KB/s)")
+        println("\n[SUCCESS] Upload finished. Complete: ${totalSize - offset} bytes in ${duration}ms (${String.format("%.2f", speed(totalSize-offset, duration))} KB/s)")
         
         receiveWithAck(3000)
     }
+    
+    private fun speed(b: Long, ms: Long) = (b / 1024.0) / (Math.max(ms, 1) / 1000.0)
 }
