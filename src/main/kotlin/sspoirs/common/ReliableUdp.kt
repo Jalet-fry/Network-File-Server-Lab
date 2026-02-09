@@ -15,34 +15,31 @@ class ReliableUdp(private val socket: DatagramSocket) {
 
     fun getSeqNum(): Int = seqNum
 
-    fun send(type: Byte, payload: ByteArray, address: InetAddress, port: Int, requireAck: Boolean = true) {
+    fun send(type: Byte, payload: ByteArray, address: InetAddress, port: Int, requireAck: Boolean = true, forcedSeq: Int = -1) {
+        val currentSeq = if (forcedSeq != -1) forcedSeq else seqNum
         val data = ByteArray(5 + payload.size)
         data[0] = type
-        writeInt(data, 1, seqNum)
+        writeInt(data, 1, currentSeq)
         payload.copyInto(data, 5)
 
         val packet = DatagramPacket(data, data.size, address, port)
         
         if (requireAck) {
-            retrySend(packet, seqNum)
+            retrySend(packet, currentSeq)
         } else {
             socket.send(packet)
         }
-        seqNum++
+        if (forcedSeq == -1) seqNum++
     }
 
     fun receive(timeout: Int = 0): UdpPacket? {
-        // Сначала проверяем, нет ли отложенных команд
         if (commandQueue.isNotEmpty()) return commandQueue.poll()
-
         val packet = DatagramPacket(buffer, buffer.size)
         return try {
             socket.soTimeout = timeout
             socket.receive(packet)
             parsePacket(packet)
-        } catch (e: Exception) {
-            null
-        }
+        } catch (e: Exception) { null }
     }
 
     fun sendAck(seq: Int, address: InetAddress, port: Int) {
@@ -78,12 +75,9 @@ class ReliableUdp(private val socket: DatagramSocket) {
                     if (p.type == 1.toByte() && (expectedSeq == -1 || p.seq >= expectedSeq)) {
                         return true
                     } else if (p.type == 2.toByte()) {
-                        // Если пришла команда вместо ACK - сохраняем её!
-                        commandQueue.add(p)
+                        commandQueue.add(p) // Сохраняем команду на будущее
                     }
-                } catch (e: SocketTimeoutException) {
-                    continue
-                }
+                } catch (e: SocketTimeoutException) { continue }
             }
         } catch (e: Exception) {}
         return false

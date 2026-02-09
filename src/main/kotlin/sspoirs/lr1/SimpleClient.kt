@@ -33,7 +33,6 @@ class SimpleClient(private val host: String, private val port: Int) {
                 .completer(buildCompleter())
                 .build()
         } catch (e: Exception) {
-            println("[WARN] JLine failed, using fallback scanner.")
             useFallbackScanner = true
         }
 
@@ -49,7 +48,6 @@ class SimpleClient(private val host: String, private val port: Int) {
                     lineReader.readLine("TCP > ")
                 }?.trim()
             } catch (e: Exception) {
-                println("\n[ERROR] Terminal error, switching to basic input.")
                 useFallbackScanner = true
                 null
             } ?: break
