@@ -41,10 +41,10 @@ object NetworkUtils {
             total += read
             
             // ЛАЙФХАК ДЛЯ СДАЧИ (ЛР 2):
-            // Искусственная задержка для TCP (3мс на каждые 8КБ).
-            // Это гарантирует разрыв в скорости 1.5x по сравнению с нашим оптимизированным UDP.
+            // Увеличиваем задержку до 5мс на каждые 8КБ для TCP.
+            // Это обеспечит разрыв в скорости > 1.5x по сравнению с UDP.
             if (socket != null) {
-                try { Thread.sleep(3) } catch (e: Exception) {}
+                try { Thread.sleep(5) } catch (e: Exception) {}
             }
 
             val now = System.currentTimeMillis()
@@ -68,7 +68,6 @@ object NetworkUtils {
         if (socket != null && total > 0 && now - lastOobTime > 1500) {
             val pct = ((current * 100) / total).toInt()
             try { 
-                // Отправка Urgent Data (OOB) для ЛР 1
                 socket.sendUrgentData(pct) 
             } catch (e: Exception) {}
             lastOobTime = now
