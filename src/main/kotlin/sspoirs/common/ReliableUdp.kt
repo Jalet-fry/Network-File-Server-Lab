@@ -10,10 +10,13 @@ import java.util.*
 class ReliableUdp(private val socket: DatagramSocket) {
     private var seqNum = 0
     private val buffer = ByteArray(Constants.UDP_PACKET_SIZE + 10)
-    // Очередь для хранения команд, пришедших во время ожидания ACK
     private val commandQueue: Queue<UdpPacket> = LinkedList()
 
     fun getSeqNum(): Int = seqNum
+    
+    fun advanceSeq(delta: Int) {
+        seqNum += delta
+    }
 
     fun send(type: Byte, payload: ByteArray, address: InetAddress, port: Int, requireAck: Boolean = true, forcedSeq: Int = -1) {
         val currentSeq = if (forcedSeq != -1) forcedSeq else seqNum
@@ -75,7 +78,7 @@ class ReliableUdp(private val socket: DatagramSocket) {
                     if (p.type == 1.toByte() && (expectedSeq == -1 || p.seq >= expectedSeq)) {
                         return true
                     } else if (p.type == 2.toByte()) {
-                        commandQueue.add(p) // Сохраняем команду на будущее
+                        commandQueue.add(p)
                     }
                 } catch (e: SocketTimeoutException) { continue }
             }
