@@ -17,7 +17,6 @@ object NetworkUtils {
     fun getLocalIpAddresses(): List<String> {
         val addresses = mutableListOf<Triple<Int, String, String>>()
         var primaryIp: String? = null
-        
         try {
             DatagramSocket().use { socket ->
                 socket.connect(InetAddress.getByName("8.8.8.8"), 10002)
@@ -30,16 +29,13 @@ object NetworkUtils {
             while (interfaces.hasMoreElements()) {
                 val iface = interfaces.nextElement()
                 if (iface.isLoopback || !iface.isUp) continue
-                
                 val iers = iface.inetAddresses
                 while (iers.hasMoreElements()) {
                     val addr = iers.nextElement()
                     val ip = addr.hostAddress
                     if (ip.contains(":")) continue 
-                    
                     val name = iface.displayName
                     val nameLower = name.lowercase()
-                    
                     var priority = 50 
                     if (nameLower.contains("wi-fi") || nameLower.contains("wireless") || nameLower.contains("wlan") || nameLower.contains("rz608")) {
                         priority = 100 
@@ -50,18 +46,13 @@ object NetworkUtils {
                     } else if (nameLower.contains("tunnel") || nameLower.contains("hide.me") || nameLower.contains("vpn")) {
                         priority = 10
                     }
-
                     if (ip == primaryIp) priority += 5
                     addresses.add(Triple(priority, name, ip))
                 }
             }
-        } catch (e: Exception) {
-            return listOf("Error detecting IP: ${e.message}")
-        }
-
+        } catch (e: Exception) { return listOf("Error detecting IP: ${e.message}") }
         val sorted = addresses.sortedByDescending { it.first }
         val topPriority = sorted.firstOrNull()?.first ?: 0
-
         return sorted.map { (priority, name, ip) ->
             if (priority == topPriority && priority > 50) ">>> [RECOMMENDED] $name: $ip"
             else "    $name: $ip"
@@ -94,7 +85,10 @@ object NetworkUtils {
         var lastPrintTime = 0L
         var localLastOobTime = 0L
         val actualFullSize = if (fullSize > 0) fullSize else length
-        val clientTag = socket?.remoteSocketAddress?.toString()?.takeLast(5) ?: "???"
+        
+        // Определяем, кто вызвал функцию: сервер (есть socket) или клиент
+        val isServer = socket != null && socket.localPort == 8888 // Условно считаем портом сервера 8888
+        val clientTag = socket?.remoteSocketAddress?.toString()?.takeLast(5) ?: ""
 
         while (total < length) {
             val toRead = Math.min(buffer.size.toLong(), length - total).toInt()
@@ -105,25 +99,40 @@ object NetworkUtils {
             total += read
             
             val now = System.currentTimeMillis()
-            if (now - lastPrintTime > 1000) { 
+            // Настройка частоты вывода: на сервере реже, на клиенте чаще
+            val printInterval = if (isServer) 5000 else 300 
+            
+            if (now - lastPrintTime > printInterval) { 
                 val currentTotal = offset + total
                 val pct = if (actualFullSize > 0) (currentTotal * 100 / actualFullSize) else 0
-                println("[Progress $clientTag] $currentTotal / $actualFullSize bytes ($pct%)")
+                
+                if (isServer) {
+                    // Сервер пишет в новую строку, но редко
+                    println("[Progress $clientTag] $currentTotal / $actualFullSize bytes ($pct%)")
+                } else {
+                    // Клиент пишет в одну строку через \r
+                    print("\r[Progress] $currentTotal / $actualFullSize bytes ($pct%)")
+                }
                 lastPrintTime = now
             }
 
             if (socket != null && actualFullSize > 0 && now - localLastOobTime > 1500) {
                 val pct = (((offset + total) * 100) / actualFullSize).toInt()
-                try { 
-                    socket.sendUrgentData(pct) 
-                } catch (e: Exception) {}
+                try { socket.sendUrgentData(pct) } catch (e: Exception) {}
                 localLastOobTime = now
             }
         }
         output.flush()
+        if (!isServer) println() // Перевод строки после прогресс-бара клиента
+        
         val duration = Math.max(System.currentTimeMillis() - start, 1)
         val speed = (total / 1024.0) / (duration / 1000.0)
-        println("[Transfer $clientTag] Complete at ${getTimestamp()}: $total bytes in ${duration}ms (${String.format("%.2f", speed)} KB/s)")
+        
+        if (isServer) {
+            println("[Transfer $clientTag] Complete at ${getTimestamp()}: $total bytes (${String.format("%.2f", speed)} KB/s)")
+        } else {
+            println("[Transfer] Complete: $total bytes at ${String.format("%.2f", speed)} KB/s")
+        }
         return total
     }
 }
