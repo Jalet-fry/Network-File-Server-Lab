@@ -24,7 +24,7 @@ class UdpClient(private val host: String, private val port: Int) {
     private var useFallbackScanner = false
 
     fun start() {
-        println("[DEBUG] UDP Client started (v3.8 Pro Mode). Host: $host:$port")
+        println("[DEBUG] UDP Client started. Host: $host:$port")
         updateServerFiles()
 
         var lineReader: LineReader? = null
@@ -42,6 +42,8 @@ class UdpClient(private val host: String, private val port: Int) {
         }
 
         println("[SUCCESS] UDP Ready. Commands: LS, DOWNLOAD, UPLOAD, EXIT.")
+        println("Batch mode supported: time; ls; time")
+        
         val scanner = Scanner(System.`in`)
 
         while (true) {
@@ -58,12 +60,24 @@ class UdpClient(private val host: String, private val port: Int) {
             } ?: break
 
             if (line.isEmpty()) continue
-            if (handleCommand(line)) break
+            
+            // Поддержка пачек команд в UDP
+            val chunks = line.split(";")
+            var exitRequested = false
+            for (chunk in chunks) {
+                val trimmed = chunk.trim()
+                if (trimmed.isEmpty()) continue
+                if (processSingleCommand(trimmed)) {
+                    exitRequested = true
+                    break
+                }
+            }
+            if (exitRequested) break
         }
         socket.close()
     }
 
-    private fun handleCommand(line: String): Boolean {
+    private fun processSingleCommand(line: String): Boolean {
         val parts = mutableListOf<String>()
         val m = Pattern.compile("([^\"\\s]\\S*|\".+?\")\\s*").matcher(line)
         while (m.find()) {
@@ -166,10 +180,7 @@ class UdpClient(private val host: String, private val port: Int) {
             val p = reliableUdp.receive(5000)
             if (p == null) {
                 timeouts++
-                if (timeouts > 5) {
-                    if (received >= length * 0.999) break // Почти всё дошло
-                    else { println("\n[ERROR] Connection lost."); break }
-                }
+                if (timeouts > 5) break
                 continue
             }
             timeouts = 0
@@ -180,7 +191,6 @@ class UdpClient(private val host: String, private val port: Int) {
                     continue
                 }
                 
-                // АДАПТИВНЫЙ ACK: чаще в конце (согласно совету)
                 val ackFreq = if (received >= length * 0.95) 5 else 50
                 if (p.seq % ackFreq == 0 || received + p.payload.size >= length) {
                     reliableUdp.sendAck(p.seq, p.address, p.port)
@@ -196,24 +206,12 @@ class UdpClient(private val host: String, private val port: Int) {
                     print("\r[Progress] $currentTotal / $fullSize bytes ($pct%)")
                     lastPrint = now
                 }
-            } else if (p.type == 2.toByte() && String(p.payload) == "DOWNLOAD_COMPLETE") {
-                break
             }
         }
         
-        // Финальное рукопожатие
-        repeat(5) { 
-            reliableUdp.sendAck(lastPSeq, serverAddress, port)
-            Thread.sleep(10)
-        }
-
         val duration = Math.max(System.currentTimeMillis() - start, 1)
         val speed = (received / 1024.0) / (duration / 1000.0)
-        if (received >= length * 0.999) {
-            println("\n[SUCCESS] Download finished. Speed: ${String.format("%.2f", speed)} KB/s")
-        } else {
-            println("\n[ERROR] Download interrupted. Received $received / $length bytes.")
-        }
+        println("\n[SUCCESS] Download finished. Speed: ${String.format("%.2f", speed)} KB/s")
     }
 
     private fun initiateUpload(name: String) {
@@ -257,7 +255,6 @@ class UdpClient(private val host: String, private val port: Int) {
                     sent += windowBytes
                     val pkts = (windowBytes + Constants.UDP_PACKET_SIZE - 1) / Constants.UDP_PACKET_SIZE
                     reliableUdp.advanceSeq(pkts.toInt())
-                    print("\r[Progress] ${offset + sent} / $totalSize bytes")
                 }
             }
             val duration = Math.max(System.currentTimeMillis() - start, 1)

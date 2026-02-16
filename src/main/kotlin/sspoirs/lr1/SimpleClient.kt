@@ -37,6 +37,8 @@ class SimpleClient(private val host: String, private val port: Int) {
         }
 
         println("\n[SUCCESS] Connected! Commands: LS, DOWNLOAD, UPLOAD, EXIT.")
+        println("You can use batch commands like: time; download file.exe; time")
+        
         val scanner = Scanner(System.`in`)
 
         while (true) {
@@ -53,9 +55,51 @@ class SimpleClient(private val host: String, private val port: Int) {
             } ?: break
 
             if (line.isEmpty()) continue
-            if (handleCommand(line)) break
+            
+            // Обрабатываем строку как набор команд, разделенных ';'
+            val chunks = line.split(";")
+            var exitRequested = false
+            for (chunk in chunks) {
+                val trimmed = chunk.trim()
+                if (trimmed.isEmpty()) continue
+                if (processSingleCommand(trimmed)) {
+                    exitRequested = true
+                    break
+                }
+            }
+            if (exitRequested) break
         }
         socket?.close()
+    }
+
+    private fun processSingleCommand(line: String): Boolean {
+        val parts = mutableListOf<String>()
+        val m = Pattern.compile("([^\"\\s]\\S*|\".+?\")\\s*").matcher(line)
+        while (m.find()) {
+            parts.add(m.group(1).replace("\"", ""))
+        }
+
+        if (parts.isEmpty()) return false
+        val cmd = Command.fromString(parts[0])
+        val arg = parts.getOrNull(1)
+
+        return try {
+            when (cmd) {
+                Command.LIST -> { requestFileList(); false }
+                Command.DOWNLOAD -> { if (!arg.isNullOrEmpty()) initiateDownload(arg); false }
+                Command.UPLOAD -> { if (!arg.isNullOrEmpty()) initiateUpload(arg); false }
+                Command.CLOSE -> true
+                else -> { 
+                    NetworkUtils.writeLine(outputStream!!, line)
+                    val resp = NetworkUtils.readLineBuffered(inputStream!!)
+                    println("Server ($line): $resp")
+                    false 
+                }
+            }
+        } catch (e: Exception) {
+            println("[ERROR] Connection lost.")
+            true
+        }
     }
 
     private fun buildCompleter() = AggregateCompleter(
@@ -75,35 +119,6 @@ class SimpleClient(private val host: String, private val port: Int) {
         } catch (e: Exception) {
             println("[FAILED] Connection error: ${e.message}")
             false
-        }
-    }
-
-    private fun handleCommand(line: String): Boolean {
-        val parts = mutableListOf<String>()
-        val m = Pattern.compile("([^\"\\s]\\S*|\".+?\")\\s*").matcher(line)
-        while (m.find()) {
-            parts.add(m.group(1).replace("\"", ""))
-        }
-
-        if (parts.isEmpty()) return false
-        val cmd = Command.fromString(parts[0])
-        val arg = parts.getOrNull(1)
-
-        return try {
-            when (cmd) {
-                Command.LIST -> { requestFileList(); false }
-                Command.DOWNLOAD -> { if (!arg.isNullOrEmpty()) initiateDownload(arg); false }
-                Command.UPLOAD -> { if (!arg.isNullOrEmpty()) initiateUpload(arg); false }
-                Command.CLOSE -> true
-                else -> { 
-                    NetworkUtils.writeLine(outputStream!!, line)
-                    println("Server: ${NetworkUtils.readLineBuffered(inputStream!!)}")
-                    false 
-                }
-            }
-        } catch (e: Exception) {
-            println("[ERROR] Connection lost.")
-            true
         }
     }
 

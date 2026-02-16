@@ -11,37 +11,34 @@ class TcpThreadPoolServer(private val port: Int) {
     
     private val activeTasks = AtomicInteger(0)
 
-    // Вариант 5: Пул потоков с динамическим расширением (Nmin -> Nmax)
     private val executor = ThreadPoolExecutor(
-        Constants.THREAD_POOL_N_MIN, // Начальное кол-во потоков (Nmin)
-        Constants.THREAD_POOL_N_MAX, // Максимальное кол-во потоков (Nmax)
-        Constants.IDLE_TIMEOUT_MS,   // Время жизни лишних потоков
+        Constants.THREAD_POOL_N_MIN, 
+        Constants.THREAD_POOL_N_MAX, 
+        Constants.IDLE_TIMEOUT_MS,   
         TimeUnit.MILLISECONDS,
-        // Использование SynchronousQueue заставляет пул создавать новые потоки немедленно,
-        // пока не достигнет Nmax, вместо того чтобы копить их в очереди.
         SynchronousQueue<Runnable>(), 
         ThreadPoolExecutor.AbortPolicy()
     ).apply {
-        prestartAllCoreThreads() // Инициализируем Nmin потоков сразу
+        prestartAllCoreThreads()
     }
 
     fun start() {
         try {
+            println("--- Server Starting at ${NetworkUtils.getTimestamp()} ---")
+            println("[SERVER] Available local IP addresses:")
+            NetworkUtils.getLocalIpAddresses().forEach { println("  - $it") }
+
             ServerSocket(port).use { serverSocket ->
                 println("[SERVER] Lab 4 TCP Pool started on port $port")
                 println("[CONFIG] Nmin=${Constants.THREAD_POOL_N_MIN}, Nmax=${Constants.THREAD_POOL_N_MAX}")
 
                 while (!Thread.currentThread().isInterrupted) {
                     try {
-                        // Механизм защиты accept (согласно варианту 5)
-                        // В данном случае используется блокировка на объекте сокета
                         val clientSocket = synchronized(serverSocket) {
                             serverSocket.accept()
                         }
                         
-                        // Настройка согласно п. 2.a REQUIREMENTS.md
                         clientSocket.keepAlive = true 
-                        // Таймаут на чтение (чтобы не висеть вечно, если клиент "умер")
                         clientSocket.soTimeout = 60000 
                         
                         dispatchClient(clientSocket)
@@ -63,21 +60,20 @@ class TcpThreadPoolServer(private val port: Int) {
         try {
             executor.execute {
                 activeTasks.incrementAndGet()
-                println("[POOL] Handling client $clientAddr. Active: ${activeTasks.get()}, Pool: ${executor.poolSize}")
+                // Добавили временную метку в лог подключения
+                println("[${NetworkUtils.getTimestamp()}] New connection from $clientAddr. Active: ${activeTasks.get()}")
                 
                 try {
-                    // Используем обработчик сессии из ЛР1
                     TcpSessionHandler(socket).run()
                 } catch (e: Exception) {
                     println("[SESSION ERROR] $clientAddr: ${e.message}")
                 } finally {
                     activeTasks.decrementAndGet()
-                    println("[POOL] Finished $clientAddr. Active: ${activeTasks.get()}")
-                    // Сокет закрывается внутри TcpSessionHandler (через use)
+                    // Добавили временную метку в лог завершения
+                    println("[${NetworkUtils.getTimestamp()}] Session with $clientAddr finished. Active: ${activeTasks.get()}")
                 }
             }
         } catch (e: RejectedExecutionException) {
-            // Если достигли Nmax и очередь полна
             println("[POOL FULL] Rejected connection from $clientAddr")
             try { 
                 NetworkUtils.writeLine(socket.getOutputStream(), "ERROR: Server busy")

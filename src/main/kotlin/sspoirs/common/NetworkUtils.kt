@@ -1,10 +1,78 @@
 package sspoirs.common
 
 import java.io.*
+import java.net.DatagramSocket
+import java.net.InetAddress
+import java.net.NetworkInterface
 import java.net.Socket
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 
 object NetworkUtils {
-    // Убрали глобальный lastOobTime, так как он мешал параллельным потокам
+    
+    private val timeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
+
+    fun getTimestamp(): String = LocalDateTime.now().format(timeFormatter)
+
+    fun getLocalIpAddresses(): List<String> {
+        val addresses = mutableListOf<Triple<Int, String, String>>()
+        var primaryIp: String? = null
+        
+        try {
+            DatagramSocket().use { socket ->
+                socket.connect(InetAddress.getByName("8.8.8.8"), 10002)
+                primaryIp = socket.localAddress.hostAddress
+            }
+        } catch (e: Exception) { }
+
+        try {
+            val interfaces = NetworkInterface.getNetworkInterfaces()
+            while (interfaces.hasMoreElements()) {
+                val iface = interfaces.nextElement()
+                if (iface.isLoopback || !iface.isUp) continue
+                
+                val iers = iface.inetAddresses
+                while (iers.hasMoreElements()) {
+                    val addr = iers.nextElement()
+                    val ip = addr.hostAddress
+                    if (ip.contains(":")) continue 
+                    
+                    val name = iface.displayName
+                    val nameLower = name.lowercase()
+                    
+                    var priority = 50 
+                    
+                    // Wi-Fi и реальный Ethernet — высший приоритет для лабы
+                    if (nameLower.contains("wi-fi") || nameLower.contains("wireless") || nameLower.contains("wlan") || nameLower.contains("rz608")) {
+                        priority = 100 
+                    } else if (nameLower.contains("ethernet") && !nameLower.contains("virtual")) {
+                        priority = 90
+                    } 
+                    // Виртуалки и VPN — низший приоритет
+                    else if (nameLower.contains("virtual") || nameLower.contains("vbox") || nameLower.contains("vmware")) {
+                        priority = 20
+                    } else if (nameLower.contains("tunnel") || nameLower.contains("hide.me") || nameLower.contains("vpn")) {
+                        priority = 10
+                    }
+
+                    // Бонус "системного выбора", но не перекрывающий тип адаптера
+                    if (ip == primaryIp) priority += 5
+                    
+                    addresses.add(Triple(priority, name, ip))
+                }
+            }
+        } catch (e: Exception) {
+            return listOf("Error detecting IP: ${e.message}")
+        }
+
+        val sorted = addresses.sortedByDescending { it.first }
+        val topPriority = sorted.firstOrNull()?.first ?: 0
+
+        return sorted.map { (priority, name, ip) ->
+            if (priority == topPriority && priority > 50) ">>> [RECOMMENDED] $name: $ip"
+            else "    $name: $ip"
+        }
+    }
 
     fun readLineBuffered(inputStream: InputStream): String? {
         val out = ByteArrayOutputStream()
@@ -30,7 +98,7 @@ object NetworkUtils {
         var total: Long = 0
         val start = System.currentTimeMillis()
         var lastPrintTime = 0L
-        var localLastOobTime = 0L // Индивидуальный таймер для каждого потока
+        var localLastOobTime = 0L
         val actualFullSize = if (fullSize > 0) fullSize else length
         val clientTag = socket?.remoteSocketAddress?.toString()?.takeLast(5) ?: "???"
 
@@ -43,8 +111,6 @@ object NetworkUtils {
             total += read
             
             val now = System.currentTimeMillis()
-            // На сервере при параллельной работе лучше не использовать \r, 
-            // так как строки от разных клиентов будут перемешиваться.
             if (now - lastPrintTime > 1000) { 
                 val currentTotal = offset + total
                 val pct = if (actualFullSize > 0) (currentTotal * 100 / actualFullSize) else 0
@@ -52,21 +118,18 @@ object NetworkUtils {
                 lastPrintTime = now
             }
 
-            // Обработка Urgent Data (OOB) для Лабы 4
             if (socket != null && actualFullSize > 0 && now - localLastOobTime > 1500) {
                 val pct = (((offset + total) * 100) / actualFullSize).toInt()
                 try { 
                     socket.sendUrgentData(pct) 
-                } catch (e: Exception) {
-                    // Игнорируем ошибки OOB, если клиент не поддерживает
-                }
+                } catch (e: Exception) {}
                 localLastOobTime = now
             }
         }
         output.flush()
         val duration = Math.max(System.currentTimeMillis() - start, 1)
         val speed = (total / 1024.0) / (duration / 1000.0)
-        println("[Transfer $clientTag] Complete: $total bytes in ${duration}ms (${String.format("%.2f", speed)} KB/s)")
+        println("[Transfer $clientTag] Complete at ${getTimestamp()}: $total bytes in ${duration}ms (${String.format("%.2f", speed)} KB/s)")
         return total
     }
 }

@@ -8,22 +8,37 @@ import java.time.LocalDateTime
 import java.nio.channels.FileChannel
 import java.nio.ByteBuffer
 
-class UdpServer(private val port: Int) {
+class UdpServer(private val port: Int) : CommandExecutor {
     private val socket = DatagramSocket(port).apply {
         receiveBufferSize = 4 * 1024 * 1024 
         sendBufferSize = 4 * 1024 * 1024
     }
     private val reliableUdp = ReliableUdp(socket)
+    
+    // Временные переменные для текущего пакета
+    private var currentAddr: InetAddress? = null
+    private var currentPort: Int = 0
 
     fun start() {
-        println("[UDP SERVER v3.9] Listening on port $port...")
+        println("--- UDP Server Starting at ${NetworkUtils.getTimestamp()} ---")
+        println("[SERVER] Available local IP addresses:")
+        NetworkUtils.getLocalIpAddresses().forEach { println("  - $it") }
+        
+        println("[UDP SERVER] Listening on port $port...")
         while (true) {
             try {
-                // receive(0) теперь умеет доставать отложенные пакеты из очереди
                 val packet = reliableUdp.receive(0) ?: continue 
                 if (packet.type == 2.toByte()) {
                     reliableUdp.sendAck(packet.seq, packet.address, packet.port)
-                    processCommand(String(packet.payload), packet.address, packet.port)
+                    
+                    val line = String(packet.payload)
+                    println("[${NetworkUtils.getTimestamp()}] Received UDP from ${packet.address}: $line")
+
+                    currentAddr = packet.address
+                    currentPort = packet.port
+                    
+                    // Используем общий CommandProcessor
+                    CommandProcessor.processLine(line, this)
                 }
             } catch (e: Exception) {
                 println("[UDP ERROR] ${e.message}")
@@ -31,28 +46,26 @@ class UdpServer(private val port: Int) {
         }
     }
 
-    private fun processCommand(line: String, address: InetAddress, port: Int) {
-        val parts = line.split(Regex("\\s+"))
-        val cmd = Command.fromString(parts[0])
-        val args = parts.drop(1)
+    override fun execute(cmd: Command, args: List<String>): Boolean {
+        val addr = currentAddr ?: return false
+        val p = currentPort
 
-        println("[UDP] Command from $address: $line")
+        println("[SERVER] Executing sub-command: $cmd")
 
         when (cmd) {
-            Command.ECHO -> reliableUdp.sendReliable(2, args.joinToString(" ").toByteArray(), address, port)
-            Command.TIME -> reliableUdp.sendReliable(2, LocalDateTime.now().toString().toByteArray(), address, port)
-            Command.LIST -> handleList(address, port)
-            Command.DOWNLOAD -> handleDownload(args.getOrNull(0), args.getOrNull(1)?.toLongOrNull() ?: 0, address, port)
-            Command.UPLOAD -> handleUpload(args.getOrNull(0), args.getOrNull(1)?.toLongOrNull() ?: 0, args.getOrNull(2)?.toLongOrNull() ?: 0, address, port)
-            else -> reliableUdp.sendReliable(2, "Unknown command".toByteArray(), address, port)
+            Command.ECHO -> reliableUdp.sendReliable(2, args.joinToString(" ").toByteArray(), addr, p)
+            Command.TIME -> reliableUdp.sendReliable(2, LocalDateTime.now().toString().toByteArray(), addr, p)
+            Command.LIST -> handleList(addr, p)
+            Command.DOWNLOAD -> handleDownload(args.getOrNull(0), args.getOrNull(1)?.toLongOrNull() ?: 0, addr, p)
+            Command.UPLOAD -> handleUpload(args.getOrNull(0), args.getOrNull(1)?.toLongOrNull() ?: 0, args.getOrNull(2)?.toLongOrNull() ?: 0, addr, p)
+            Command.CLOSE -> return false
+            else -> reliableUdp.sendReliable(2, "Unknown command '$cmd'".toByteArray(), addr, p)
         }
+        return true
     }
 
     private fun handleList(address: InetAddress, port: Int) {
-        val dir = File(Constants.SERVER_STORAGE)
-        if (!dir.exists()) dir.mkdirs()
-        val files = dir.listFiles()?.filter { it.isFile }
-            ?.joinToString(";") { "${it.name}(${it.length()}b)" } ?: "No files"
+        val files = CommandProcessor.getServerFilesList()
         reliableUdp.sendReliable(2, "FILES $files".toByteArray(), address, port)
     }
 
@@ -91,10 +104,9 @@ class UdpServer(private val port: Int) {
                     if (sentBytes + currentWindowBytes >= remaining) break
                 }
 
-                // Ждем кумулятивный ACK. Если продвинулись хоть на сколько-то - считаем успех.
                 if (!reliableUdp.waitForAck(windowStartSeq + windowSize / 2, 1200)) {
                     if (sentBytes + currentWindowBytes >= remaining) break 
-                    println("[UDP] Window lag, retrying from seq $windowStartSeq")
+                    println("[UDP] Window lag at ${NetworkUtils.getTimestamp()}, retrying from seq $windowStartSeq")
                     fc.position(windowStartPos)
                     continue
                 }
@@ -104,7 +116,7 @@ class UdpServer(private val port: Int) {
             }
         }
         val duration = Math.max(System.currentTimeMillis() - start, 1)
-        println("[UDP] Download finished. Speed: ${String.format("%.2f", (remaining / 1024.0) / (duration / 1000.0))} KB/s")
+        println("[${NetworkUtils.getTimestamp()}] UDP Download finished. Speed: ${String.format("%.2f", (remaining / 1024.0) / (duration / 1000.0))} KB/s")
         Thread.sleep(100)
         reliableUdp.clearQueue()
     }
@@ -141,6 +153,6 @@ class UdpServer(private val port: Int) {
         }
         val duration = Math.max(System.currentTimeMillis() - start, 1)
         reliableUdp.sendReliable(2, "SUCCESS".toByteArray(), addr, port)
-        println("[UDP] Upload finished for $name. Speed: ${String.format("%.2f", (totalReceived / 1024.0) / (duration / 1000.0))} KB/s")
+        println("[${NetworkUtils.getTimestamp()}] UDP Upload finished for $name. Speed: ${String.format("%.2f", (totalReceived / 1024.0) / (duration / 1000.0))} KB/s")
     }
 }
