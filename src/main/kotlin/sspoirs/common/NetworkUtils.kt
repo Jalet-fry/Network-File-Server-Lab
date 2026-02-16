@@ -4,7 +4,7 @@ import java.io.*
 import java.net.Socket
 
 object NetworkUtils {
-    private var lastOobTime = 0L
+    // Убрали глобальный lastOobTime, так как он мешал параллельным потокам
 
     fun readLineBuffered(inputStream: InputStream): String? {
         val out = ByteArrayOutputStream()
@@ -30,7 +30,9 @@ object NetworkUtils {
         var total: Long = 0
         val start = System.currentTimeMillis()
         var lastPrintTime = 0L
+        var localLastOobTime = 0L // Индивидуальный таймер для каждого потока
         val actualFullSize = if (fullSize > 0) fullSize else length
+        val clientTag = socket?.remoteSocketAddress?.toString()?.takeLast(5) ?: "???"
 
         while (total < length) {
             val toRead = Math.min(buffer.size.toLong(), length - total).toInt()
@@ -41,29 +43,30 @@ object NetworkUtils {
             total += read
             
             val now = System.currentTimeMillis()
-            if (now - lastPrintTime > 300) {
+            // На сервере при параллельной работе лучше не использовать \r, 
+            // так как строки от разных клиентов будут перемешиваться.
+            if (now - lastPrintTime > 1000) { 
                 val currentTotal = offset + total
                 val pct = if (actualFullSize > 0) (currentTotal * 100 / actualFullSize) else 0
-                print("\r[Progress] $currentTotal / $actualFullSize bytes ($pct%)")
+                println("[Progress $clientTag] $currentTotal / $actualFullSize bytes ($pct%)")
                 lastPrintTime = now
             }
-            handleOobProgress(socket, offset + total, actualFullSize)
+
+            // Обработка Urgent Data (OOB) для Лабы 4
+            if (socket != null && actualFullSize > 0 && now - localLastOobTime > 1500) {
+                val pct = (((offset + total) * 100) / actualFullSize).toInt()
+                try { 
+                    socket.sendUrgentData(pct) 
+                } catch (e: Exception) {
+                    // Игнорируем ошибки OOB, если клиент не поддерживает
+                }
+                localLastOobTime = now
+            }
         }
         output.flush()
         val duration = Math.max(System.currentTimeMillis() - start, 1)
         val speed = (total / 1024.0) / (duration / 1000.0)
-        println("\n[Transfer] Complete: $total bytes in ${duration}ms (${String.format("%.2f", speed)} KB/s)")
+        println("[Transfer $clientTag] Complete: $total bytes in ${duration}ms (${String.format("%.2f", speed)} KB/s)")
         return total
-    }
-
-    private fun handleOobProgress(socket: Socket?, current: Long, total: Long) {
-        val now = System.currentTimeMillis()
-        if (socket != null && total > 0 && now - lastOobTime > 1500) {
-            val pct = ((current * 100) / total).toInt()
-            try { 
-                socket.sendUrgentData(pct) 
-            } catch (e: Exception) {}
-            lastOobTime = now
-        }
     }
 }

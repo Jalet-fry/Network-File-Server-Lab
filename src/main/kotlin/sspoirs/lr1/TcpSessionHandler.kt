@@ -10,8 +10,6 @@ class TcpSessionHandler(private val socket: Socket) : Runnable {
     override fun run() {
         val clientInfo = socket.remoteSocketAddress
         try {
-            // Устанавливаем таймаут на 60 секунд, чтобы сокет не висел вечно, 
-            // но и не рвался во время долгой передачи файлов (ЛР 4)
             socket.soTimeout = 60000
             
             socket.use { s ->
@@ -21,7 +19,6 @@ class TcpSessionHandler(private val socket: Socket) : Runnable {
                 println("[SERVER] New connection from $clientInfo")
                 
                 while (!s.isClosed) {
-                    // Читаем команду. Если клиент отключился, readLineBuffered вернет null
                     val line = try {
                         NetworkUtils.readLineBuffered(input)
                     } catch (e: Exception) {
@@ -33,15 +30,26 @@ class TcpSessionHandler(private val socket: Socket) : Runnable {
                         break
                     }
                     
-                    if (line.isEmpty()) continue
+                    if (line.isBlank()) continue
                     
                     println("[SERVER] Received from $clientInfo: $line")
-                    val parts = line.split(Regex("\\s+"))
-                    val cmd = Command.fromString(parts[0])
-                    val args = parts.drop(1)
+
+                    // РАЗДЕЛЯЕМ СТРОКУ НА КОМАНДЫ ПО СИМВОЛУ ';'
+                    val commandChunks = line.split(";")
                     
-                    if (!handleCommand(cmd, args, input, output)) {
-                        break
+                    for (chunk in commandChunks) {
+                        val trimmedChunk = chunk.trim()
+                        if (trimmedChunk.isEmpty()) continue
+                        
+                        val parts = trimmedChunk.split(Regex("\\s+"))
+                        val cmd = Command.fromString(parts[0])
+                        val args = parts.drop(1)
+                        
+                        println("[SERVER] Executing sub-command: $cmd with args $args")
+                        
+                        if (!handleCommand(cmd, args, input, output)) {
+                            return // Если CLOSE, выходим из цикла и закрываем сессию
+                        }
                     }
                 }
             }
@@ -59,8 +67,11 @@ class TcpSessionHandler(private val socket: Socket) : Runnable {
             Command.LIST -> NetworkUtils.writeLine(output, "FILES ${getServerFiles()}")
             Command.DOWNLOAD -> doDownload(args, output)
             Command.UPLOAD -> doUpload(args, input, output)
-            Command.CLOSE -> return false
-            else -> NetworkUtils.writeLine(output, "Error: Unknown command")
+            Command.CLOSE -> {
+                NetworkUtils.writeLine(output, "BYE")
+                return false
+            }
+            else -> NetworkUtils.writeLine(output, "Error: Unknown command '$cmd'")
         }
         return true
     }
@@ -88,9 +99,7 @@ class TcpSessionHandler(private val socket: Socket) : Runnable {
         
         RandomAccessFile(file, "r").use { raf ->
             raf.seek(safeOffset)
-            // Используем FIS от дескриптора, чтобы не закрыть файл раньше времени
-            val bytesSent = NetworkUtils.copyStream(FileInputStream(raf.fd), output, remaining, socket)
-            println("[SERVER] Sent $bytesSent bytes of $fileName")
+            NetworkUtils.copyStream(FileInputStream(raf.fd), output, remaining, socket)
         }
     }
 
@@ -105,8 +114,7 @@ class TcpSessionHandler(private val socket: Socket) : Runnable {
 
         RandomAccessFile(file, "rw").use { raf ->
             raf.seek(actualOffset)
-            val bytesReceived = NetworkUtils.copyStream(input, FileOutputStream(raf.fd), remaining, socket)
-            println("[SERVER] Received $bytesReceived bytes for $name")
+            NetworkUtils.copyStream(input, FileOutputStream(raf.fd), remaining, socket)
         }
         NetworkUtils.writeLine(output, "SUCCESS")
     }
