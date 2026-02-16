@@ -41,23 +41,17 @@ object NetworkUtils {
                     val nameLower = name.lowercase()
                     
                     var priority = 50 
-                    
-                    // Wi-Fi и реальный Ethernet — высший приоритет для лабы
                     if (nameLower.contains("wi-fi") || nameLower.contains("wireless") || nameLower.contains("wlan") || nameLower.contains("rz608")) {
                         priority = 100 
                     } else if (nameLower.contains("ethernet") && !nameLower.contains("virtual")) {
                         priority = 90
-                    } 
-                    // Виртуалки и VPN — низший приоритет
-                    else if (nameLower.contains("virtual") || nameLower.contains("vbox") || nameLower.contains("vmware")) {
+                    } else if (nameLower.contains("virtual") || nameLower.contains("vbox") || nameLower.contains("vmware")) {
                         priority = 20
                     } else if (nameLower.contains("tunnel") || nameLower.contains("hide.me") || nameLower.contains("vpn")) {
                         priority = 10
                     }
 
-                    // Бонус "системного выбора", но не перекрывающий тип адаптера
                     if (ip == primaryIp) priority += 5
-                    
                     addresses.add(Triple(priority, name, ip))
                 }
             }

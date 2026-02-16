@@ -22,7 +22,6 @@ class TcpSessionHandler(private val socket: Socket) : Runnable, CommandExecutor 
                     val line = try { NetworkUtils.readLineBuffered(input) } catch (e: Exception) { null }
                     if (line == null) break
                     
-                    // Используем общий процессор
                     if (!CommandProcessor.processLine(line, this)) break
                 }
             }
@@ -31,10 +30,9 @@ class TcpSessionHandler(private val socket: Socket) : Runnable, CommandExecutor 
         }
     }
 
-    // Реализация выполнения конкретных команд для TCP
     override fun execute(cmd: Command, args: List<String>): Boolean {
         when (cmd) {
-            Command.TIME -> NetworkUtils.writeLine(output, LocalDateTime.now().toString())
+            Command.TIME -> NetworkUtils.writeLine(output, NetworkUtils.getTimestamp())
             Command.ECHO -> NetworkUtils.writeLine(output, args.joinToString(" "))
             Command.LIST -> NetworkUtils.writeLine(output, "FILES ${CommandProcessor.getServerFilesList()}")
             Command.DOWNLOAD -> doDownload(args, output)
