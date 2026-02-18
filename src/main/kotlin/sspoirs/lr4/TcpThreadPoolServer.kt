@@ -40,7 +40,8 @@ class TcpThreadPoolServer(private val port: Int) {
                         
                         clientSocket.keepAlive = true 
                         clientSocket.tcpNoDelay = true 
-                        clientSocket.soTimeout = 300000 
+                        // Увеличиваем таймаут до 10 минут для стабильности
+                        clientSocket.soTimeout = 600000
                         
                         dispatchClient(clientSocket)
                     } catch (e: Exception) {

@@ -13,20 +13,20 @@ object NetworkUtils {
     
     private val timeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
     private val activeTransfers = ConcurrentHashMap<String, String>()
+    private val lock = Any() // Объект для синхронизации вывода в консоль
 
     fun getTimestamp(): String = LocalDateTime.now().format(timeFormatter)
 
-    /**
-     * Используйте этот метод вместо println на сервере, чтобы не ломать живую строку прогресса
-     */
     fun log(message: String) {
-        // Очищаем текущую строку статуса перед выводом лога
-        print("\r" + " ".repeat(100) + "\r")
-        println(message)
-        if (activeTransfers.isNotEmpty()) renderStatusLine()
+        synchronized(lock) {
+            // Очищаем текущую строку статуса перед выводом лога (100 пробелов)
+            print("\r" + " ".repeat(100) + "\r")
+            println(message)
+            if (activeTransfers.isNotEmpty()) renderStatusLineInternal()
+        }
     }
 
-    private fun renderStatusLine() {
+    private fun renderStatusLineInternal() {
         val status = activeTransfers.entries.joinToString(" ") { "[${it.key}: ${it.value}]" }
         print("\r$status")
     }
@@ -103,8 +103,8 @@ object NetworkUtils {
         var lastOobTime = start
         val actualFullSize = if (fullSize > 0) fullSize else length
         
-        val clientTag = socket?.remoteSocketAddress?.toString()?.split(":")?.lastOrNull() ?: ""
-        val isServerSide = socket != null && clientTag.isNotEmpty()
+        val clientTag = socket?.remoteSocketAddress?.toString()?.split(":")?.lastOrNull() ?: "???"
+        val isServerSide = socket != null && socket.localPort == 8888 
 
         try {
             while (total < length) {
@@ -118,17 +118,20 @@ object NetworkUtils {
                 val now = System.currentTimeMillis()
                 val pct = if (actualFullSize > 0) ((offset + total) * 100 / actualFullSize).toInt() else 0
 
-                if (now - lastPrintTime > 300) { 
-                    if (isServerSide) {
-                        activeTransfers[clientTag] = "$pct%"
-                        renderStatusLine()
-                    } else {
-                        print("\r[Progress] $pct% (${offset + total} / $actualFullSize bytes)")
+                if (now - lastPrintTime > 500) { 
+                    synchronized(lock) {
+                        if (isServerSide) {
+                            activeTransfers[clientTag] = "$pct%"
+                            renderStatusLineInternal()
+                        } else {
+                            print("\r[Progress] $pct% (${offset + total} / $actualFullSize bytes)")
+                        }
                     }
                     lastPrintTime = now
                 }
 
-                if (socket != null && now - lastOobTime > 2000) {
+                // Отправляем Urgent Data реже - раз в 5 секунд, чтобы не перегружать стек TCP
+                if (socket != null && now - lastOobTime > 5000) {
                     try { socket.sendUrgentData(pct) } catch (e: Exception) {}
                     lastOobTime = now
                 }
@@ -136,7 +139,10 @@ object NetworkUtils {
         } finally {
             if (isServerSide) {
                 activeTransfers.remove(clientTag)
-                print("\r" + " ".repeat(100) + "\r") // Стираем строку перед завершением
+                synchronized(lock) {
+                    print("\r" + " ".repeat(100) + "\r")
+                    if (activeTransfers.isNotEmpty()) renderStatusLineInternal()
+                }
             }
         }
 
