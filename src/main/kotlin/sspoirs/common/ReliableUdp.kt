@@ -9,7 +9,7 @@ import java.util.*
 
 class ReliableUdp(private val socket: DatagramSocket) {
     private var seqNum = 0
-    private val buffer = ByteArray(Constants.UDP_PACKET_SIZE + 100)
+    private val buffer = ByteArray(Constants.BUFFER_SIZE)
     private val incomingQueue: Queue<UdpPacket> = LinkedList()
 
     fun getSeqNum(): Int = seqNum
@@ -40,7 +40,8 @@ class ReliableUdp(private val socket: DatagramSocket) {
         var attempts = 0
         while (attempts < Constants.MAX_RETRIES) {
             socket.send(packet)
-            if (waitForAck(s, 1000)) return
+            // Использование константы UDP_TIMEOUT
+            if (waitForAck(s, Constants.UDP_TIMEOUT.toInt())) return
             attempts++
         }
         throw IOException("UDP Reliable Send Failed for seq $s")
@@ -66,7 +67,7 @@ class ReliableUdp(private val socket: DatagramSocket) {
     }
 
     fun waitForAck(expectedSeq: Int, timeout: Int): Boolean {
-        val ackBuf = ByteArray(Constants.UDP_PACKET_SIZE + 100)
+        val ackBuf = ByteArray(Constants.BUFFER_SIZE)
         val ackPacket = DatagramPacket(ackBuf, ackBuf.size)
         val start = System.currentTimeMillis()
         while (System.currentTimeMillis() - start < timeout) {

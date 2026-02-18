@@ -60,7 +60,6 @@ class TcpThreadPoolServer(private val port: Int) {
         try {
             executor.execute {
                 activeTasks.incrementAndGet()
-                // Добавили временную метку в лог подключения
                 println("[${NetworkUtils.getTimestamp()}] New connection from $clientAddr. Active: ${activeTasks.get()}")
                 
                 try {
@@ -69,16 +68,20 @@ class TcpThreadPoolServer(private val port: Int) {
                     println("[SESSION ERROR] $clientAddr: ${e.message}")
                 } finally {
                     activeTasks.decrementAndGet()
-                    // Добавили временную метку в лог завершения
                     println("[${NetworkUtils.getTimestamp()}] Session with $clientAddr finished. Active: ${activeTasks.get()}")
                 }
             }
         } catch (e: RejectedExecutionException) {
             println("[POOL FULL] Rejected connection from $clientAddr")
-            try { 
-                NetworkUtils.writeLine(socket.getOutputStream(), "ERROR: Server busy")
-                socket.close() 
-            } catch (ex: Exception) {}
+            // Даем клиенту шанс прочитать ошибку перед закрытием
+            Thread {
+                try {
+                    val out = socket.getOutputStream()
+                    NetworkUtils.writeLine(out, "ERROR: Server busy. Max connections reached.")
+                    Thread.sleep(500) // Пауза полсекунды
+                    socket.close()
+                } catch (ex: Exception) {}
+            }.start()
         }
     }
 }

@@ -56,7 +56,6 @@ class SimpleClient(private val host: String, private val port: Int) {
 
             if (line.isEmpty()) continue
             
-            // Обрабатываем строку как набор команд, разделенных ';'
             val chunks = line.split(";")
             var exitRequested = false
             for (chunk in chunks) {
@@ -70,6 +69,7 @@ class SimpleClient(private val host: String, private val port: Int) {
             if (exitRequested) break
         }
         socket?.close()
+        println("[INFO] Client session finished.")
     }
 
     private fun processSingleCommand(line: String): Boolean {
@@ -92,12 +92,17 @@ class SimpleClient(private val host: String, private val port: Int) {
                 else -> { 
                     NetworkUtils.writeLine(outputStream!!, line)
                     val resp = NetworkUtils.readLineBuffered(inputStream!!)
+                    if (resp == null) {
+                        println("[ERROR] Server disconnected.")
+                        return true
+                    }
                     println("Server ($line): $resp")
+                    if (resp.startsWith("ERROR: Server busy")) return true
                     false 
                 }
             }
         } catch (e: Exception) {
-            println("[ERROR] Connection lost.")
+            println("[ERROR] Connection lost: ${e.message}")
             true
         }
     }
@@ -114,6 +119,19 @@ class SimpleClient(private val host: String, private val port: Int) {
             socket?.keepAlive = true
             inputStream = BufferedInputStream(socket!!.getInputStream())
             outputStream = socket!!.getOutputStream()
+            
+            // Проверка на моментальный отказ сервера (для ЛР4)
+            val initialResp = try {
+                socket!!.soTimeout = 500
+                NetworkUtils.readLineBuffered(inputStream!!)
+            } catch (e: Exception) { null }
+            finally { socket!!.soTimeout = 60000 }
+
+            if (initialResp != null && initialResp.startsWith("ERROR: Server busy")) {
+                println("\n[REJECTED] $initialResp")
+                return false
+            }
+
             updateServerFiles()
             true
         } catch (e: Exception) {
@@ -122,21 +140,25 @@ class SimpleClient(private val host: String, private val port: Int) {
         }
     }
 
+    private fun updateFileListFromResponse(resp: String) {
+        if (resp.startsWith("FILES")) {
+            serverFiles.clear()
+            val data = resp.substringAfter("FILES ")
+            if (data != "No files") {
+                data.split(";").forEach {
+                    val name = it.substringBefore("(")
+                    val size = it.substringAfter("(").substringBefore("b)").toLongOrNull() ?: 0L
+                    serverFiles[name] = size
+                }
+            }
+        }
+    }
+
     private fun updateServerFiles() {
         try {
             NetworkUtils.writeLine(outputStream!!, "LS")
             val resp = NetworkUtils.readLineBuffered(inputStream!!) ?: return
-            if (resp.startsWith("FILES")) {
-                serverFiles.clear()
-                val data = resp.substringAfter("FILES ")
-                if (data != "No files") {
-                    data.split(";").forEach {
-                        val name = it.substringBefore("(")
-                        val size = it.substringAfter("(").substringBefore("b)").toLongOrNull() ?: 0L
-                        serverFiles[name] = size
-                    }
-                }
-            }
+            updateFileListFromResponse(resp)
         } catch (e: Exception) {}
     }
 
@@ -173,7 +195,10 @@ class SimpleClient(private val host: String, private val port: Int) {
                 NetworkUtils.copyStream(inputStream!!, fos, remainingSize, socket, offset, fullSize)
             }
             println("\n[SUCCESS] Download finished.")
-        } else println("Server: $resp")
+        } else {
+            println("Server: $resp")
+            if (resp.startsWith("ERROR: Server busy")) socket?.close()
+        }
     }
 
     private fun initiateUpload(name: String) {
@@ -195,7 +220,8 @@ class SimpleClient(private val host: String, private val port: Int) {
             }
             NetworkUtils.copyStream(fis, outputStream!!, totalSize - offset, socket, offset, totalSize)
         }
-        println("Server: ${NetworkUtils.readLineBuffered(inputStream!!)}")
+        val finalResp = NetworkUtils.readLineBuffered(inputStream!!)
+        println("Server: $finalResp")
         updateServerFiles()
     }
 }
