@@ -16,9 +16,12 @@ object Constants {
     
     // Thread Pool (Lab 4)
     const val THREAD_POOL_N_MIN = 2
-    // Уменьшили до 4 для большей стабильности в Wi-Fi сети
     const val THREAD_POOL_N_MAX = 4
     const val IDLE_TIMEOUT_MS = 60000L
+    
+    // Timeouts
+    const val READ_TIMEOUT_MS = 30000 // 30 секунд на ожидание команды
+    const val SESSION_MAX_IDLE_MS = 300000L // 5 минут макс. простой
     
     const val SERVER_STORAGE = "files-server"
     const val CLIENT_STORAGE = "files-client"

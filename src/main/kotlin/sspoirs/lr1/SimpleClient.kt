@@ -11,6 +11,7 @@ import sspoirs.common.NetworkUtils
 import java.io.*
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.net.SocketTimeoutException
 import java.util.Scanner
 import java.util.regex.Pattern
 
@@ -37,7 +38,6 @@ class SimpleClient(private val host: String, private val port: Int) {
         }
 
         println("\n[SUCCESS] Connected! Commands: LS, DOWNLOAD, UPLOAD, EXIT.")
-        println("You can use batch commands like: time; download file.exe; time")
         
         val scanner = Scanner(System.`in`)
 
@@ -54,7 +54,7 @@ class SimpleClient(private val host: String, private val port: Int) {
                 null
             } ?: break
 
-            if (line.isEmpty()) continue
+            if (line.isNullOrEmpty()) continue
             
             val chunks = line.split(";")
             var exitRequested = false
@@ -73,6 +73,8 @@ class SimpleClient(private val host: String, private val port: Int) {
     }
 
     private fun processSingleCommand(line: String): Boolean {
+        if (socket == null || socket!!.isClosed) return true
+
         val parts = mutableListOf<String>()
         val m = Pattern.compile("([^\"\\s]\\S*|\".+?\")\\s*").matcher(line)
         while (m.find()) {
@@ -85,9 +87,28 @@ class SimpleClient(private val host: String, private val port: Int) {
 
         return try {
             when (cmd) {
-                Command.LIST -> { requestFileList(); false }
-                Command.DOWNLOAD -> { if (!arg.isNullOrEmpty()) initiateDownload(arg); false }
-                Command.UPLOAD -> { if (!arg.isNullOrEmpty()) initiateUpload(arg); false }
+                Command.LIST -> { 
+                    if (!updateServerFiles()) {
+                        println("[ERROR] Connection lost or server timeout.")
+                        return true
+                    }
+                    requestFileList()
+                    false 
+                }
+                Command.DOWNLOAD -> { 
+                    if (!arg.isNullOrEmpty()) {
+                        if (!updateServerFiles()) return true
+                        initiateDownload(arg)
+                    }
+                    false 
+                }
+                Command.UPLOAD -> { 
+                    if (!arg.isNullOrEmpty()) {
+                        if (!updateServerFiles()) return true
+                        initiateUpload(arg)
+                    }
+                    false 
+                }
                 Command.CLOSE -> true
                 else -> { 
                     NetworkUtils.writeLine(outputStream!!, line)
@@ -96,11 +117,13 @@ class SimpleClient(private val host: String, private val port: Int) {
                         println("[ERROR] Server disconnected.")
                         return true
                     }
-                    println("Server ($line): $resp")
-                    if (resp.startsWith("ERROR: Server busy")) return true
+                    println("Server: $resp")
                     false 
                 }
             }
+        } catch (e: SocketTimeoutException) {
+            println("[ERROR] Server non-responsive (Timeout).")
+            true
         } catch (e: Exception) {
             println("[ERROR] Connection lost: ${e.message}")
             true
@@ -115,24 +138,20 @@ class SimpleClient(private val host: String, private val port: Int) {
     private fun connect(): Boolean {
         return try {
             socket = Socket()
+            // Тайм-аут на установку соединения 5 сек
             socket?.connect(InetSocketAddress(host, port), 5000)
             socket?.keepAlive = true
+            socket?.tcpNoDelay = true
+            // Клиент ждет ответа на команду не более 5 секунд
+            socket?.soTimeout = 5000
+            
             inputStream = BufferedInputStream(socket!!.getInputStream())
             outputStream = socket!!.getOutputStream()
             
-            // Проверка на моментальный отказ сервера (для ЛР4)
-            val initialResp = try {
-                socket!!.soTimeout = 500
-                NetworkUtils.readLineBuffered(inputStream!!)
-            } catch (e: Exception) { null }
-            finally { socket!!.soTimeout = 60000 }
-
-            if (initialResp != null && initialResp.startsWith("ERROR: Server busy")) {
-                println("\n[REJECTED] $initialResp")
+            if (!updateServerFiles()) {
+                println("[FAILED] Server did not respond to initial request.")
                 return false
             }
-
-            updateServerFiles()
             true
         } catch (e: Exception) {
             println("[FAILED] Connection error: ${e.message}")
@@ -140,38 +159,41 @@ class SimpleClient(private val host: String, private val port: Int) {
         }
     }
 
-    private fun updateFileListFromResponse(resp: String) {
-        if (resp.startsWith("FILES")) {
-            serverFiles.clear()
-            val data = resp.substringAfter("FILES ")
-            if (data != "No files") {
-                data.split(";").forEach {
-                    val name = it.substringBefore("(")
-                    val size = it.substringAfter("(").substringBefore("b)").toLongOrNull() ?: 0L
-                    serverFiles[name] = size
+    private fun updateServerFiles(): Boolean {
+        return try {
+            NetworkUtils.writeLine(outputStream!!, "LS")
+            val resp = NetworkUtils.readLineBuffered(inputStream!!)
+            if (resp != null) {
+                if (resp.startsWith("FILES")) {
+                    serverFiles.clear()
+                    val data = resp.substringAfter("FILES ")
+                    if (data != "No files" && data.isNotEmpty()) {
+                        data.split(";").forEach {
+                            val name = it.substringBefore("(")
+                            val size = it.substringAfter("(").substringBefore("b)").toLongOrNull() ?: 0L
+                            serverFiles[name] = size
+                        }
+                    }
                 }
-            }
+                true
+            } else false
+        } catch (e: Exception) {
+            false
         }
     }
 
-    private fun updateServerFiles() {
-        try {
-            NetworkUtils.writeLine(outputStream!!, "LS")
-            val resp = NetworkUtils.readLineBuffered(inputStream!!) ?: return
-            updateFileListFromResponse(resp)
-        } catch (e: Exception) {}
-    }
-
     private fun requestFileList() {
-        updateServerFiles()
         println("\n--- Server Files ---")
-        serverFiles.forEach { (name, size) -> println(" - $name ($size bytes)") }
+        if (serverFiles.isEmpty()) {
+            println(" (No files)")
+        } else {
+            serverFiles.forEach { (name, size) -> println(" - $name ($size bytes)") }
+        }
     }
 
     private fun initiateDownload(name: String) {
         val file = File(Constants.CLIENT_STORAGE, name)
         val offset = if (file.exists()) file.length() else 0L
-        updateServerFiles()
         val fullSize = serverFiles[name] ?: -1L
         
         if (fullSize != -1L && offset >= fullSize) {
@@ -185,43 +207,56 @@ class SimpleClient(private val host: String, private val port: Int) {
         if (resp.startsWith("OK")) {
             val remainingSize = resp.split(" ")[1].toLong()
             println("[INFO] Downloading $remainingSize bytes...")
-            RandomAccessFile(file, "rw").use { raf ->
-                raf.seek(offset)
-                val fos = object : OutputStream() {
-                    override fun write(b: Int) = raf.write(b)
-                    override fun write(b: ByteArray, off: Int, len: Int) = raf.write(b, off, len)
-                    override fun write(b: ByteArray) = raf.write(b)
+            
+            // Во время загрузки отключаем таймаут
+            val oldTimeout = socket?.soTimeout ?: 0
+            socket?.soTimeout = 0
+            try {
+                RandomAccessFile(file, "rw").use { raf ->
+                    raf.seek(offset)
+                    val fos = object : OutputStream() {
+                        override fun write(b: Int) = raf.write(b)
+                        override fun write(b: ByteArray, off: Int, len: Int) = raf.write(b, off, len)
+                        override fun write(b: ByteArray) = raf.write(b)
+                    }
+                    NetworkUtils.copyStream(inputStream!!, fos, remainingSize, socket, offset, fullSize)
                 }
-                NetworkUtils.copyStream(inputStream!!, fos, remainingSize, socket, offset, fullSize)
+                println("\n[SUCCESS] Download finished.")
+            } finally {
+                socket?.soTimeout = oldTimeout
             }
-            println("\n[SUCCESS] Download finished.")
         } else {
             println("Server: $resp")
-            if (resp.startsWith("ERROR: Server busy")) socket?.close()
         }
     }
 
     private fun initiateUpload(name: String) {
         val file = File(Constants.CLIENT_STORAGE, name)
         if (!file.exists()) return println("Local file not found.")
-        updateServerFiles()
         val offset = serverFiles[name] ?: 0L
         val totalSize = file.length()
         
         if (offset >= totalSize) return println("[INFO] Already uploaded.")
 
         NetworkUtils.writeLine(outputStream!!, "UPLOAD $name $totalSize $offset")
-        RandomAccessFile(file, "r").use { raf ->
-            raf.seek(offset)
-            val fis = object : InputStream() {
-                override fun read() = raf.read()
-                override fun read(b: ByteArray, off: Int, len: Int) = raf.read(b, off, len)
-                override fun read(b: ByteArray) = raf.read(b)
+        
+        val oldTimeout = socket?.soTimeout ?: 0
+        socket?.soTimeout = 0
+        try {
+            RandomAccessFile(file, "r").use { raf ->
+                raf.seek(offset)
+                val fis = object : InputStream() {
+                    override fun read() = raf.read()
+                    override fun read(b: ByteArray, off: Int, len: Int) = raf.read(b, off, len)
+                    override fun read(b: ByteArray) = raf.read(b)
+                }
+                NetworkUtils.copyStream(fis, outputStream!!, totalSize - offset, socket, offset, totalSize)
             }
-            NetworkUtils.copyStream(fis, outputStream!!, totalSize - offset, socket, offset, totalSize)
+            val finalResp = NetworkUtils.readLineBuffered(inputStream!!)
+            println("Server: $finalResp")
+        } finally {
+            socket?.soTimeout = oldTimeout
         }
-        val finalResp = NetworkUtils.readLineBuffered(inputStream!!)
-        println("Server: $finalResp")
         updateServerFiles()
     }
 }
