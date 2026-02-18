@@ -7,12 +7,29 @@ import java.net.NetworkInterface
 import java.net.Socket
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
+import java.util.concurrent.ConcurrentHashMap
 
 object NetworkUtils {
     
     private val timeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
+    private val activeTransfers = ConcurrentHashMap<String, String>()
 
     fun getTimestamp(): String = LocalDateTime.now().format(timeFormatter)
+
+    /**
+     * Используйте этот метод вместо println на сервере, чтобы не ломать живую строку прогресса
+     */
+    fun log(message: String) {
+        // Очищаем текущую строку статуса перед выводом лога
+        print("\r" + " ".repeat(100) + "\r")
+        println(message)
+        if (activeTransfers.isNotEmpty()) renderStatusLine()
+    }
+
+    private fun renderStatusLine() {
+        val status = activeTransfers.entries.joinToString(" ") { "[${it.key}: ${it.value}]" }
+        print("\r$status")
+    }
 
     fun getLocalIpAddresses(): List<String> {
         val addresses = mutableListOf<Triple<Int, String, String>>()
@@ -79,60 +96,57 @@ object NetworkUtils {
     }
 
     fun copyStream(input: InputStream, output: OutputStream, length: Long, socket: Socket? = null, offset: Long = 0L, fullSize: Long = -1L): Long {
-        val buffer = ByteArray(Constants.BUFFER_SIZE)
+        val buffer = ByteArray(Constants.BUFFER_SIZE) 
         var total: Long = 0
         val start = System.currentTimeMillis()
-        var lastPrintTime = 0L
-        var localLastOobTime = 0L
+        var lastPrintTime = start 
+        var lastOobTime = start
         val actualFullSize = if (fullSize > 0) fullSize else length
         
-        // Определяем, кто вызвал функцию: сервер (есть socket) или клиент
-        val isServer = socket != null && socket.localPort == 8888 // Условно считаем портом сервера 8888
-        val clientTag = socket?.remoteSocketAddress?.toString()?.takeLast(5) ?: ""
+        val clientTag = socket?.remoteSocketAddress?.toString()?.split(":")?.lastOrNull() ?: ""
+        val isServerSide = socket != null && clientTag.isNotEmpty()
 
-        while (total < length) {
-            val toRead = Math.min(buffer.size.toLong(), length - total).toInt()
-            val read = try { input.read(buffer, 0, toRead) } catch (e: Exception) { -1 }
-            if (read <= 0) break
-            
-            output.write(buffer, 0, read)
-            total += read
-            
-            val now = System.currentTimeMillis()
-            // Настройка частоты вывода: на сервере реже, на клиенте чаще
-            val printInterval = if (isServer) 5000 else 300 
-            
-            if (now - lastPrintTime > printInterval) { 
-                val currentTotal = offset + total
-                val pct = if (actualFullSize > 0) (currentTotal * 100 / actualFullSize) else 0
+        try {
+            while (total < length) {
+                val toRead = Math.min(buffer.size.toLong(), length - total).toInt()
+                val read = try { input.read(buffer, 0, toRead) } catch (e: Exception) { -1 }
+                if (read <= 0) break
                 
-                if (isServer) {
-                    // Сервер пишет в новую строку, но редко
-                    println("[Progress $clientTag] $currentTotal / $actualFullSize bytes ($pct%)")
-                } else {
-                    // Клиент пишет в одну строку через \r
-                    print("\r[Progress] $currentTotal / $actualFullSize bytes ($pct%)")
-                }
-                lastPrintTime = now
-            }
+                output.write(buffer, 0, read)
+                total += read
+                
+                val now = System.currentTimeMillis()
+                val pct = if (actualFullSize > 0) ((offset + total) * 100 / actualFullSize).toInt() else 0
 
-            if (socket != null && actualFullSize > 0 && now - localLastOobTime > 1500) {
-                val pct = (((offset + total) * 100) / actualFullSize).toInt()
-                try { socket.sendUrgentData(pct) } catch (e: Exception) {}
-                localLastOobTime = now
+                if (now - lastPrintTime > 300) { 
+                    if (isServerSide) {
+                        activeTransfers[clientTag] = "$pct%"
+                        renderStatusLine()
+                    } else {
+                        print("\r[Progress] $pct% (${offset + total} / $actualFullSize bytes)")
+                    }
+                    lastPrintTime = now
+                }
+
+                if (socket != null && now - lastOobTime > 2000) {
+                    try { socket.sendUrgentData(pct) } catch (e: Exception) {}
+                    lastOobTime = now
+                }
+            }
+        } finally {
+            if (isServerSide) {
+                activeTransfers.remove(clientTag)
+                print("\r" + " ".repeat(100) + "\r") // Стираем строку перед завершением
             }
         }
+
         output.flush()
-        if (!isServer) println() // Перевод строки после прогресс-бара клиента
+        if (!isServerSide) println() 
         
         val duration = Math.max(System.currentTimeMillis() - start, 1)
         val speed = (total / 1024.0) / (duration / 1000.0)
         
-        if (isServer) {
-            println("[Transfer $clientTag] Complete at ${getTimestamp()}: $total bytes (${String.format("%.2f", speed)} KB/s)")
-        } else {
-            println("[Transfer] Complete: $total bytes at ${String.format("%.2f", speed)} KB/s")
-        }
+        log("[Transfer $clientTag] Finished: ${String.format("%.2f", speed)} KB/s")
         return total
     }
 }

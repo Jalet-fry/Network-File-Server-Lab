@@ -24,13 +24,13 @@ class TcpThreadPoolServer(private val port: Int) {
 
     fun start() {
         try {
-            println("--- Server Starting at ${NetworkUtils.getTimestamp()} ---")
-            println("[SERVER] Available local IP addresses:")
-            NetworkUtils.getLocalIpAddresses().forEach { println("  - $it") }
+            NetworkUtils.log("--- Server Starting at ${NetworkUtils.getTimestamp()} ---")
+            NetworkUtils.log("[SERVER] Available local IP addresses:")
+            NetworkUtils.getLocalIpAddresses().forEach { NetworkUtils.log("  - $it") }
 
             ServerSocket(port).use { serverSocket ->
-                println("[SERVER] Lab 4 TCP Pool started on port $port")
-                println("[CONFIG] Nmin=${Constants.THREAD_POOL_N_MIN}, Nmax=${Constants.THREAD_POOL_N_MAX}")
+                NetworkUtils.log("[SERVER] Lab 4 TCP Pool started on port $port")
+                NetworkUtils.log("[CONFIG] Nmin=${Constants.THREAD_POOL_N_MIN}, Nmax=${Constants.THREAD_POOL_N_MAX}")
 
                 while (!Thread.currentThread().isInterrupted) {
                     try {
@@ -39,17 +39,18 @@ class TcpThreadPoolServer(private val port: Int) {
                         }
                         
                         clientSocket.keepAlive = true 
-                        clientSocket.soTimeout = 60000 
+                        clientSocket.tcpNoDelay = true 
+                        clientSocket.soTimeout = 300000 
                         
                         dispatchClient(clientSocket)
                     } catch (e: Exception) {
                         if (serverSocket.isClosed) break
-                        println("[ERROR] Accept failed: ${e.message}")
+                        NetworkUtils.log("[ERROR] Accept failed: ${e.message}")
                     }
                 }
             }
         } catch (e: Exception) {
-            println("[FATAL] Server socket error: ${e.message}")
+            NetworkUtils.log("[FATAL] Server socket error: ${e.message}")
         } finally {
             executor.shutdown()
         }
@@ -60,25 +61,24 @@ class TcpThreadPoolServer(private val port: Int) {
         try {
             executor.execute {
                 activeTasks.incrementAndGet()
-                println("[${NetworkUtils.getTimestamp()}] New connection from $clientAddr. Active: ${activeTasks.get()}")
+                NetworkUtils.log("[${NetworkUtils.getTimestamp()}] New connection from $clientAddr. Active: ${activeTasks.get()}")
                 
                 try {
                     TcpSessionHandler(socket).run()
                 } catch (e: Exception) {
-                    println("[SESSION ERROR] $clientAddr: ${e.message}")
+                    NetworkUtils.log("[SESSION ERROR] $clientAddr: ${e.message}")
                 } finally {
                     activeTasks.decrementAndGet()
-                    println("[${NetworkUtils.getTimestamp()}] Session with $clientAddr finished. Active: ${activeTasks.get()}")
+                    NetworkUtils.log("[${NetworkUtils.getTimestamp()}] Session with $clientAddr finished. Active: ${activeTasks.get()}")
                 }
             }
         } catch (e: RejectedExecutionException) {
-            println("[POOL FULL] Rejected connection from $clientAddr")
-            // Даем клиенту шанс прочитать ошибку перед закрытием
+            NetworkUtils.log("[POOL FULL] Rejected connection from $clientAddr")
             Thread {
                 try {
                     val out = socket.getOutputStream()
                     NetworkUtils.writeLine(out, "ERROR: Server busy. Max connections reached.")
-                    Thread.sleep(500) // Пауза полсекунды
+                    Thread.sleep(500)
                     socket.close()
                 } catch (ex: Exception) {}
             }.start()
