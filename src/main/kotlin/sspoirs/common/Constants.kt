@@ -7,7 +7,6 @@ object Constants {
     const val DEFAULT_HOST = "localhost"
     const val LINE_SEPARATOR = "\r\n"
     
-    // Увеличили буфер для скорости во всех лабах
     const val BUFFER_SIZE = 65536 
     
     // UDP specific
@@ -17,7 +16,8 @@ object Constants {
     
     // Thread Pool (Lab 4)
     const val THREAD_POOL_N_MIN = 2
-    const val THREAD_POOL_N_MAX = 5
+    // Уменьшили до 4 для большей стабильности в Wi-Fi сети
+    const val THREAD_POOL_N_MAX = 4
     const val IDLE_TIMEOUT_MS = 60000L
     
     const val SERVER_STORAGE = "files-server"
