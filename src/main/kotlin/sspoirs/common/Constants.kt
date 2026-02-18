@@ -14,9 +14,9 @@ object Constants {
     const val UDP_TIMEOUT = 1000L 
     const val MAX_RETRIES = 5
     
-    // Thread Pool (Lab 4)
+    // Thread Pool (Lab 4) - Согласовано с REQUIREMENTS.md
     const val THREAD_POOL_N_MIN = 2
-    const val THREAD_POOL_N_MAX = 4
+    const val THREAD_POOL_N_MAX = 5
     const val IDLE_TIMEOUT_MS = 60000L
     
     // Timeouts

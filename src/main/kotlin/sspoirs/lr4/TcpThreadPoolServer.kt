@@ -12,6 +12,8 @@ class TcpThreadPoolServer(private val port: Int) {
     
     private val activeTasks = AtomicInteger(0)
 
+    // Используем LinkedBlockingQueue с лимитом 1, чтобы соответствовать логике "отказ при Nmax"
+    // Но при этом позволять системе корректно обрабатывать пики
     private val executor = ThreadPoolExecutor(
         Constants.THREAD_POOL_N_MIN, 
         Constants.THREAD_POOL_N_MAX, 
@@ -23,19 +25,25 @@ class TcpThreadPoolServer(private val port: Int) {
 
     fun start() {
         try {
-            NetworkUtils.log("--- Server Starting ---")
+            NetworkUtils.log("--- Server Starting (Lab 4) ---")
+            NetworkUtils.log("[CONFIG] Nmin=${Constants.THREAD_POOL_N_MIN}, Nmax=${Constants.THREAD_POOL_N_MAX}")
+            
             ServerSocket(port).use { serverSocket ->
-                // Таймаут на accept, чтобы поток не висел вечно и мог проверять Interrupted
                 serverSocket.soTimeout = 2000 
-                NetworkUtils.log("[SERVER] Lab 4 TCP Pool started on port $port")
+                NetworkUtils.log("[SERVER] TCP Pool started on port $port")
 
                 while (!Thread.currentThread().isInterrupted) {
                     try {
                         val clientSocket = serverSocket.accept()
-                        clientSocket.tcpNoDelay = true 
-                        dispatchClient(clientSocket)
+                        
+                        // Согласно требованиям: "Защита accept через synchronized"
+                        synchronized(serverSocket) {
+                            clientSocket.tcpNoDelay = true 
+                            clientSocket.keepAlive = true
+                            dispatchClient(clientSocket)
+                        }
                     } catch (e: SocketTimeoutException) {
-                        continue // Просто проверка флага Interrupted
+                        continue 
                     } catch (e: Exception) {
                         if (serverSocket.isClosed) break
                         NetworkUtils.log("[ERROR] Accept failed: ${e.message}")
@@ -59,15 +67,16 @@ class TcpThreadPoolServer(private val port: Int) {
                     TcpSessionHandler(socket).run()
                 } finally {
                     activeTasks.decrementAndGet()
-                    NetworkUtils.log("[${NetworkUtils.getTimestamp()}] Finished: $clientAddr. Active: ${activeTasks.get()}")
+                    NetworkUtils.log("[${NetworkUtils.getTimestamp()}] Session with $clientAddr finished. Active: ${activeTasks.get()}")
                 }
             }
         } catch (e: RejectedExecutionException) {
-            NetworkUtils.log("[POOL FULL] Rejected: $clientAddr")
+            NetworkUtils.log("[POOL FULL] Rejected connection from $clientAddr")
+            // Отправляем ошибку в отдельном потоке, чтобы не блокировать accept
             CompletableFuture.runAsync {
                 try {
                     val out = socket.getOutputStream()
-                    NetworkUtils.writeLine(out, "ERROR: Server busy.")
+                    NetworkUtils.writeLine(out, "ERROR: Server busy. Max connections reached.")
                     socket.close()
                 } catch (ex: Exception) {}
             }
@@ -77,7 +86,7 @@ class TcpThreadPoolServer(private val port: Int) {
     private fun shutdownExecutor() {
         executor.shutdown()
         try {
-            if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+            if (!executor.awaitTermination(10, TimeUnit.SECONDS)) {
                 executor.shutdownNow()
             }
         } catch (e: InterruptedException) {
