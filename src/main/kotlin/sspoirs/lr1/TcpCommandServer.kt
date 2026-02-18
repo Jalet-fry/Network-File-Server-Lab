@@ -13,7 +13,6 @@ class TcpCommandServer(private val port: Int) : CommandExecutor {
     private val selector = Selector.open()
     private val serverChannel = ServerSocketChannel.open()
     
-    // Временное хранилище для текущей сессии при выполнении execute
     private var currentSession: ClientSession? = null
     private var currentKey: SelectionKey? = null
 
@@ -38,8 +37,6 @@ class TcpCommandServer(private val port: Int) : CommandExecutor {
                         try {
                             handleSelectionKey(key)
                         } catch (e: Exception) {
-                            val addr = (key.attachment() as? ClientSession)?.remoteAddr ?: "unknown"
-                            println("[SERVER] Error with client $addr: ${e.message}")
                             closeClient(key)
                         }
                     }
@@ -62,7 +59,6 @@ class TcpCommandServer(private val port: Int) : CommandExecutor {
         val client = serverChannel.accept()
         client.configureBlocking(false)
         client.socket().keepAlive = true
-        client.socket().oobInline = false 
         client.register(selector, SelectionKey.OP_READ, ClientSession(client.remoteAddress.toString()))
         println("[${NetworkUtils.getTimestamp()}] New connection from ${client.remoteAddress}")
     }
@@ -84,10 +80,9 @@ class TcpCommandServer(private val port: Int) : CommandExecutor {
         buffer.flip()
         session.addToInput(buffer)
         
-        // Используем CommandProcessor
         while (!session.isUploading) {
             val line = session.extractLine() ?: break
-            println("[SERVER] Received from ${session.remoteAddr}: $line")
+            println("[${NetworkUtils.getTimestamp()}] Command from ${session.remoteAddr}: $line")
             
             currentSession = session
             currentKey = key
@@ -100,7 +95,7 @@ class TcpCommandServer(private val port: Int) : CommandExecutor {
         val key = currentKey ?: return false
 
         when (cmd) {
-            Command.TIME -> session.queueMsg(LocalDateTime.now().toString() + "\n")
+            Command.TIME -> session.queueMsg(NetworkUtils.getTimestamp() + "\n")
             Command.ECHO -> session.queueMsg(args.joinToString(" ") + "\n")
             Command.LIST -> session.queueMsg("FILES ${CommandProcessor.getServerFilesList()}\n")
             Command.DOWNLOAD -> setupDownload(args, session)
@@ -109,22 +104,18 @@ class TcpCommandServer(private val port: Int) : CommandExecutor {
                 closeClient(key)
                 return false
             }
-            else -> session.queueMsg("ERROR: Unknown command '$cmd'\n")
+            else -> session.queueMsg("ERROR: Unknown command\n")
         }
         if (key.isValid) key.interestOps(SelectionKey.OP_READ or SelectionKey.OP_WRITE)
-        
-        // Если началась загрузка, CommandProcessor должен прервать цикл обработки пачки
         return !session.isUploading
     }
 
     private fun setupDownload(args: List<String>, session: ClientSession) {
-        val fileName = args.getOrNull(0) ?: return session.queueMsg("ERROR: No filename\n")
+        val fileName = args.getOrNull(0) ?: return
         val file = File(Constants.SERVER_STORAGE, fileName)
         if (!file.exists()) return session.queueMsg("ERROR: Not found\n")
-        
         val offset = args.getOrNull(1)?.toLongOrNull() ?: 0L
         val safeOffset = Math.min(offset, file.length())
-        
         session.fileRaf = RandomAccessFile(file, "r").apply { seek(safeOffset) }
         session.fileRemaining = file.length() - safeOffset
         session.transferStartTime = System.currentTimeMillis()
@@ -136,16 +127,13 @@ class TcpCommandServer(private val port: Int) : CommandExecutor {
         val name = args.getOrNull(0) ?: return
         val totalSize = args.getOrNull(1)?.toLongOrNull() ?: 0L
         val offset = args.getOrNull(2)?.toLongOrNull() ?: 0L
-        
         val file = File(Constants.SERVER_STORAGE, name)
         val actualOffset = if (file.exists()) Math.min(offset, file.length()) else 0L
-        
         session.fileRaf = RandomAccessFile(file, "rw").apply { seek(actualOffset) }
         session.fileRemaining = totalSize - actualOffset
         session.isUploading = true
         session.transferStartTime = System.currentTimeMillis()
         session.transferTotalBytes = session.fileRemaining
-        
         processRemainingBuffer(session)
         if (session.fileRemaining <= 0) finishUpload(session, null)
     }
@@ -167,7 +155,6 @@ class TcpCommandServer(private val port: Int) : CommandExecutor {
         val bufferSize = Math.min(Constants.BUFFER_SIZE.toLong(), session.fileRemaining).toInt()
         val buffer = ByteBuffer.allocate(bufferSize)
         val read = try { channel.read(buffer) } catch (e: IOException) { -1 }
-        
         if (read > 0) {
             buffer.flip()
             session.fileRaf?.channel?.write(buffer)
