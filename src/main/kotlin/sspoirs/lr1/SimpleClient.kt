@@ -12,7 +12,9 @@ import java.io.*
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.SocketTimeoutException
-import java.util.Scanner
+import java.util.*
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.regex.Pattern
 
 class SimpleClient(private val host: String, private val port: Int) {
@@ -21,13 +23,11 @@ class SimpleClient(private val host: String, private val port: Int) {
     private var outputStream: OutputStream? = null
     private var serverFiles = mutableMapOf<String, Long>()
     private var useFallbackScanner = false
+    @Volatile private var lastActivity = System.currentTimeMillis()
 
     fun start() {
         println("[DEBUG] Connecting to $host:$port...")
         if (!connect()) return
-
-        // Запускаем фоновый монитор соединения
-        startConnectionMonitor()
 
         var lineReader: LineReader? = null
         try {
@@ -41,61 +41,65 @@ class SimpleClient(private val host: String, private val port: Int) {
         }
 
         println("\n[SUCCESS] Connected! Commands: LS, DOWNLOAD, UPLOAD, EXIT.")
+        println("[INFO] Idle timeout: ${Constants.SESSION_MAX_IDLE_MS / 1000}s")
         
+        startIdleMonitor()
+
         val scanner = Scanner(System.`in`)
 
-        while (socket?.isClosed == false) {
-            val line = try {
-                if (useFallbackScanner || lineReader == null) {
-                    print("TCP > ")
-                    if (scanner.hasNextLine()) scanner.nextLine() else null
-                } else {
-                    lineReader.readLine("TCP > ")
-                }?.trim()
-            } catch (e: Exception) {
-                null
-            } ?: break
+        try {
+            while (socket?.isClosed == false) {
+                val line = try {
+                    if (useFallbackScanner || lineReader == null) {
+                        print("TCP > ")
+                        if (scanner.hasNextLine()) scanner.nextLine() else null
+                    } else {
+                        lineReader.readLine("TCP > ")
+                    }?.trim()
+                } catch (e: Exception) {
+                    null
+                } ?: break
 
-            if (line.isEmpty()) continue
-            
-            val chunks = line.split(";")
-            var exitRequested = false
-            for (chunk in chunks) {
-                val trimmed = chunk.trim()
-                if (trimmed.isEmpty()) continue
-                if (processSingleCommand(trimmed)) {
-                    exitRequested = true
-                    break
+                if (line.isEmpty()) continue
+                
+                lastActivity = System.currentTimeMillis()
+                
+                val chunks = line.split(";")
+                var exitRequested = false
+                for (chunk in chunks) {
+                    val trimmed = chunk.trim()
+                    if (trimmed.isEmpty()) continue
+                    if (processSingleCommand(trimmed)) {
+                        exitRequested = true
+                        break
+                    }
                 }
+                if (exitRequested) break
             }
-            if (exitRequested) break
+        } finally {
+            closeQuietly()
+            println("[INFO] Client session finished.")
         }
-        closeQuietly()
-        println("[INFO] Client session finished.")
     }
 
-    private fun startConnectionMonitor() {
-        Thread {
-            while (socket != null && !socket!!.isClosed) {
-                try {
-                    Thread.sleep(2000)
-                    // Проверка "на вшивость": посылаем 1 байт Urgent Data.
-                    // Если сокет закрыт со стороны сервера, вылетит IOException.
-                    socket?.sendUrgentData(0xFF)
-                } catch (e: Exception) {
-                    if (socket?.isClosed == false) {
-                        println("\n[ERROR] Connection lost (Server closed session or network error).")
-                        println("Press Enter to exit...")
-                        closeQuietly()
-                    }
-                    break
+    private fun startIdleMonitor() {
+        val executor = Executors.newSingleThreadScheduledExecutor { r ->
+            Thread(r, "IdleMonitor").apply { isDaemon = true }
+        }
+        executor.scheduleAtFixedRate({
+            if (System.currentTimeMillis() - lastActivity > Constants.SESSION_MAX_IDLE_MS) {
+                if (socket?.isClosed == false) {
+                    println("\n[TIMEOUT] Session expired due to inactivity (60s).")
+                    closeQuietly()
                 }
             }
-        }.apply { isDaemon = true }.start()
+        }, 1, 1, TimeUnit.SECONDS)
     }
 
     private fun closeQuietly() {
-        try { socket?.close() } catch (e: Exception) {}
+        try { 
+            socket?.close() 
+        } catch (e: Exception) {}
     }
 
     private fun processSingleCommand(line: String): Boolean {
@@ -145,9 +149,10 @@ class SimpleClient(private val host: String, private val port: Int) {
                 }
             }
         } catch (e: SocketTimeoutException) {
-            println("[ERROR] Server response timeout (15s). Connection might be unstable.")
+            println("[ERROR] Server response timeout. Connection might be unstable.")
             true
         } catch (e: Exception) {
+            if (socket?.isClosed == true) return true
             println("[ERROR] Connection error: ${e.message}")
             true
         }
@@ -164,12 +169,14 @@ class SimpleClient(private val host: String, private val port: Int) {
             socket?.connect(InetSocketAddress(host, port), 5000)
             socket?.keepAlive = true
             socket?.tcpNoDelay = true
-            socket?.soTimeout = 15000 // Увеличили до 15 сек для команд
+            socket?.soTimeout = Constants.READ_TIMEOUT_MS
             
             inputStream = BufferedInputStream(socket!!.getInputStream())
             outputStream = socket!!.getOutputStream()
             
-            updateServerFiles()
+            // Сразу проверяем состояние сервера через LS
+            if (!updateServerFiles()) return false
+            
             true
         } catch (e: Exception) {
             println("[FAILED] Connection error: ${e.message}")
@@ -181,21 +188,34 @@ class SimpleClient(private val host: String, private val port: Int) {
         return try {
             NetworkUtils.writeLine(outputStream!!, "LS")
             val resp = NetworkUtils.readLineBuffered(inputStream!!)
-            if (resp != null) {
-                if (resp.startsWith("FILES")) {
-                    serverFiles.clear()
-                    val data = resp.substringAfter("FILES ")
-                    if (data != "No files" && data.isNotEmpty()) {
-                        data.split(";").forEach {
-                            val name = it.substringBefore("(")
-                            val size = it.substringAfter("(").substringBefore("b)").toLongOrNull() ?: 0L
-                            serverFiles[name] = size
-                        }
+            if (resp == null) {
+                println("[ERROR] Server closed connection immediately.")
+                return false
+            }
+            
+            if (resp.startsWith("ERROR")) {
+                println("\n[REJECTED] $resp")
+                return false
+            }
+
+            if (resp.startsWith("FILES")) {
+                serverFiles.clear()
+                val data = resp.substringAfter("FILES ")
+                if (data != "No files" && data.isNotEmpty()) {
+                    data.split(";").forEach {
+                        val name = it.substringBefore("(")
+                        val size = it.substringAfter("(").substringBefore("b)").toLongOrNull() ?: 0L
+                        serverFiles[name] = size
                     }
                 }
-                true
-            } else false
+                return true
+            }
+            
+            println("[ERROR] Unexpected response: $resp")
+            false
         } catch (e: Exception) {
+            if (socket?.isClosed == true) return false
+            println("[ERROR] Communication failed: ${e.message}")
             false
         }
     }
@@ -227,7 +247,7 @@ class SimpleClient(private val host: String, private val port: Int) {
             println("[INFO] Downloading $remainingSize bytes...")
             
             val oldTimeout = socket?.soTimeout ?: 0
-            socket?.soTimeout = 0 // Без таймаута на время качки
+            socket?.soTimeout = 0 
             try {
                 RandomAccessFile(file, "rw").use { raf ->
                     raf.seek(offset)
@@ -241,6 +261,7 @@ class SimpleClient(private val host: String, private val port: Int) {
                 println("\n[SUCCESS] Download finished.")
             } finally {
                 socket?.soTimeout = oldTimeout
+                lastActivity = System.currentTimeMillis()
             }
         } else {
             println("Server: $resp")
@@ -273,6 +294,7 @@ class SimpleClient(private val host: String, private val port: Int) {
             println("Server: $finalResp")
         } finally {
             socket?.soTimeout = oldTimeout
+            lastActivity = System.currentTimeMillis()
         }
         updateServerFiles()
     }

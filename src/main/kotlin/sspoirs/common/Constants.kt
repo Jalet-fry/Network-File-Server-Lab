@@ -14,14 +14,14 @@ object Constants {
     const val UDP_TIMEOUT = 1000L 
     const val MAX_RETRIES = 5
     
-    // Thread Pool (Lab 4) - Согласовано с REQUIREMENTS.md
+    // Thread Pool (Lab 4)
     const val THREAD_POOL_N_MIN = 2
-    const val THREAD_POOL_N_MAX = 5
-    const val IDLE_TIMEOUT_MS = 60000L
+    const val THREAD_POOL_N_MAX = 4 
+    const val IDLE_TIMEOUT_MS = 60000L 
     
-    // Timeouts
-    const val READ_TIMEOUT_MS = 30000 // 30 секунд на ожидание команды
-    const val SESSION_MAX_IDLE_MS = 300000L // 5 минут макс. простой
+    // Timeouts - Установлено 1 минута согласно требованию
+    const val READ_TIMEOUT_MS = 60000 // 1 минута на ожидание данных
+    const val SESSION_MAX_IDLE_MS = 60000L // 1 минута общего бездействия сессии
     
     const val SERVER_STORAGE = "files-server"
     const val CLIENT_STORAGE = "files-client"

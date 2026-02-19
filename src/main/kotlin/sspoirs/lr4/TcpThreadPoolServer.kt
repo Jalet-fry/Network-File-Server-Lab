@@ -12,8 +12,12 @@ class TcpThreadPoolServer(private val port: Int) {
     
     private val activeTasks = AtomicInteger(0)
 
-    // Используем LinkedBlockingQueue с лимитом 1, чтобы соответствовать логике "отказ при Nmax"
-    // Но при этом позволять системе корректно обрабатывать пики
+    /**
+     * Настройка для ЖЕСТКОГО ограничения (Лаб 4):
+     * 1. SynchronousQueue — заставляет пул расширяться немедленно при появлении 3-го и 4-го клиента.
+     * 2. AbortPolicy — при попытке подключить 5-го клиента (когда 4 потока заняты), 
+     *    executor выбросит RejectedExecutionException.
+     */
     private val executor = ThreadPoolExecutor(
         Constants.THREAD_POOL_N_MIN, 
         Constants.THREAD_POOL_N_MAX, 
@@ -21,7 +25,9 @@ class TcpThreadPoolServer(private val port: Int) {
         TimeUnit.MILLISECONDS,
         SynchronousQueue<Runnable>(), 
         ThreadPoolExecutor.AbortPolicy()
-    )
+    ).apply {
+        allowCoreThreadTimeOut(true)
+    }
 
     fun start() {
         try {
@@ -34,14 +40,14 @@ class TcpThreadPoolServer(private val port: Int) {
 
                 while (!Thread.currentThread().isInterrupted) {
                     try {
-                        val clientSocket = serverSocket.accept()
-                        
-                        // Согласно требованиям: "Защита accept через synchronized"
-                        synchronized(serverSocket) {
-                            clientSocket.tcpNoDelay = true 
-                            clientSocket.keepAlive = true
-                            dispatchClient(clientSocket)
+                        // Accept всегда свободен, так как мы не используем CallerRunsPolicy
+                        val clientSocket = synchronized(serverSocket) {
+                            serverSocket.accept()
                         }
+                        
+                        clientSocket.tcpNoDelay = true 
+                        clientSocket.keepAlive = true
+                        dispatchClient(clientSocket)
                     } catch (e: SocketTimeoutException) {
                         continue 
                     } catch (e: Exception) {
@@ -61,29 +67,31 @@ class TcpThreadPoolServer(private val port: Int) {
         val clientAddr = socket.remoteSocketAddress
         try {
             executor.execute {
-                activeTasks.incrementAndGet()
-                NetworkUtils.log("[${NetworkUtils.getTimestamp()}] New connection: $clientAddr. Active: ${activeTasks.get()}")
+                val currentActive = activeTasks.incrementAndGet()
+                NetworkUtils.log("[${NetworkUtils.getTimestamp()}] New connection: $clientAddr. Active tasks: $currentActive")
                 try {
                     TcpSessionHandler(socket).run()
                 } finally {
-                    activeTasks.decrementAndGet()
-                    NetworkUtils.log("[${NetworkUtils.getTimestamp()}] Session with $clientAddr finished. Active: ${activeTasks.get()}")
+                    val remaining = activeTasks.decrementAndGet()
+                    NetworkUtils.log("[${NetworkUtils.getTimestamp()}] Session with $clientAddr finished. Active tasks: $remaining")
                 }
             }
         } catch (e: RejectedExecutionException) {
-            NetworkUtils.log("[POOL FULL] Rejected connection from $clientAddr")
-            // Отправляем ошибку в отдельном потоке, чтобы не блокировать accept
-            CompletableFuture.runAsync {
-                try {
-                    val out = socket.getOutputStream()
-                    NetworkUtils.writeLine(out, "ERROR: Server busy. Max connections reached.")
-                    socket.close()
-                } catch (ex: Exception) {}
+            // Сюда попадает 5-й клиент
+            NetworkUtils.log("[REJECTED] Pool is full (N_MAX=${Constants.THREAD_POOL_N_MAX}). Client $clientAddr rejected.")
+            try {
+                // Отправляем вежливый отказ перед закрытием
+                val out = socket.getOutputStream()
+                NetworkUtils.writeLine(out, "ERROR: Server busy. Max connections (${Constants.THREAD_POOL_N_MAX}) reached.")
+                socket.close()
+            } catch (ex: Exception) {
+                try { socket.close() } catch (ex2: Exception) {}
             }
         }
     }
 
     private fun shutdownExecutor() {
+        NetworkUtils.log("[SERVER] Shutting down executor...")
         executor.shutdown()
         try {
             if (!executor.awaitTermination(10, TimeUnit.SECONDS)) {
