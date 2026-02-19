@@ -14,7 +14,6 @@ object NetworkUtils {
     private val activeTransfers = ConcurrentHashMap<String, String>()
     private val lock = Any()
 
-    // Единственный фоновый поток для отрисовки прогресса на СЕРВЕРЕ. Не тормозит сеть.
     private val statusUpdater = Executors.newSingleThreadScheduledExecutor { r ->
         Thread(r, "StatusUpdater").apply { isDaemon = true }
     }.apply {
@@ -29,7 +28,7 @@ object NetworkUtils {
 
     fun log(message: String) {
         synchronized(lock) {
-            print("\r" + " ".repeat(120) + "\r") // Очистка строки прогресса
+            print("\r" + " ".repeat(120) + "\r") 
             println(message)
             if (activeTransfers.isNotEmpty()) renderStatusLineInternal()
         }
@@ -58,7 +57,6 @@ object NetworkUtils {
         return addresses
     }
 
-    // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: пробрасываем таймаут, чтобы сессия могла его обработать
     fun readLineBuffered(inputStream: InputStream): String? {
         val out = ByteArrayOutputStream()
         var hasData = false
@@ -72,9 +70,9 @@ object NetworkUtils {
                 out.write(byte)
             }
         } catch (e: SocketTimeoutException) {
-            throw e // Пробрасываем для логики idle-сессий
+            throw e 
         } catch (e: IOException) {
-            return null // Остальные ошибки I/O означают разрыв соединения
+            return null 
         }
         return if (!hasData) null else out.toString("UTF-8")
     }
@@ -88,6 +86,7 @@ object NetworkUtils {
         val buffer = ByteArray(Constants.BUFFER_SIZE)
         var total: Long = 0
         val start = System.currentTimeMillis()
+        var lastUpdate = 0L
         val actualFullSize = if (fullSize > 0) fullSize else length
         
         val clientTag = socket?.remoteSocketAddress?.toString()?.split(":")?.lastOrNull() ?: "???"
@@ -102,14 +101,14 @@ object NetworkUtils {
                 output.write(buffer, 0, read)
                 total += read
                 
-                if (actualFullSize > 0) {
-                    val pct = ((offset + total) * 100 / actualFullSize).toInt()
-                    if (isServerSide) {
-                        // Только обновляем данные, отрисовку делает statusUpdater
-                        activeTransfers[clientTag] = "$pct%"
-                    } else {
-                        // Для клиента выводим прогресс прямо здесь, но не слишком часто
-                        if (total % (1024 * 256) == 0L || total == length) {
+                val now = System.currentTimeMillis()
+                if (now - lastUpdate > 500 || total == length) {
+                    lastUpdate = now
+                    if (actualFullSize > 0) {
+                        val pct = ((offset + total) * 100 / actualFullSize).toInt()
+                        if (isServerSide) {
+                            activeTransfers[clientTag] = "$pct%"
+                        } else {
                             synchronized(lock) {
                                 print("\r[Progress] $pct% (${offset + total} / $actualFullSize bytes)")
                             }

@@ -174,7 +174,6 @@ class SimpleClient(private val host: String, private val port: Int) {
             inputStream = BufferedInputStream(socket!!.getInputStream())
             outputStream = socket!!.getOutputStream()
             
-            // Сразу проверяем состояние сервера через LS
             if (!updateServerFiles()) return false
             
             true
@@ -188,10 +187,7 @@ class SimpleClient(private val host: String, private val port: Int) {
         return try {
             NetworkUtils.writeLine(outputStream!!, "LS")
             val resp = NetworkUtils.readLineBuffered(inputStream!!)
-            if (resp == null) {
-                println("[ERROR] Server closed connection immediately.")
-                return false
-            }
+            if (resp == null) return false
             
             if (resp.startsWith("ERROR")) {
                 println("\n[REJECTED] $resp")
@@ -210,12 +206,8 @@ class SimpleClient(private val host: String, private val port: Int) {
                 }
                 return true
             }
-            
-            println("[ERROR] Unexpected response: $resp")
             false
         } catch (e: Exception) {
-            if (socket?.isClosed == true) return false
-            println("[ERROR] Communication failed: ${e.message}")
             false
         }
     }
@@ -253,8 +245,14 @@ class SimpleClient(private val host: String, private val port: Int) {
                     raf.seek(offset)
                     val fos = object : OutputStream() {
                         override fun write(b: Int) = raf.write(b)
-                        override fun write(b: ByteArray, off: Int, len: Int) = raf.write(b, off, len)
-                        override fun write(b: ByteArray) = raf.write(b)
+                        override fun write(b: ByteArray, off: Int, len: Int) {
+                            raf.write(b, off, len)
+                            lastActivity = System.currentTimeMillis() // Продлеваем жизнь сессии
+                        }
+                        override fun write(b: ByteArray) {
+                            raf.write(b)
+                            lastActivity = System.currentTimeMillis()
+                        }
                     }
                     NetworkUtils.copyStream(inputStream!!, fos, remainingSize, socket, offset, fullSize)
                 }
@@ -285,8 +283,16 @@ class SimpleClient(private val host: String, private val port: Int) {
                 raf.seek(offset)
                 val fis = object : InputStream() {
                     override fun read() = raf.read()
-                    override fun read(b: ByteArray, off: Int, len: Int) = raf.read(b, off, len)
-                    override fun read(b: ByteArray) = raf.read(b)
+                    override fun read(b: ByteArray, off: Int, len: Int): Int {
+                        val r = raf.read(b, off, len)
+                        if (r > 0) lastActivity = System.currentTimeMillis() // Продлеваем жизнь
+                        return r
+                    }
+                    override fun read(b: ByteArray): Int {
+                        val r = raf.read(b)
+                        if (r > 0) lastActivity = System.currentTimeMillis()
+                        return r
+                    }
                 }
                 NetworkUtils.copyStream(fis, outputStream!!, totalSize - offset, socket, offset, totalSize)
             }

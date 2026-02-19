@@ -8,5 +8,4 @@ if %ERRORLEVEL% NEQ 0 (
 ) else (
     echo.
     echo [SUCCESS] Build complete. Now you can use START scripts.
-    pause
 )
