@@ -10,21 +10,21 @@ import kotlin.random.Random
 class MatrixMultGroups {
 
     fun run(args: List<String>) {
-        val numGroups = args.find { it.startsWith("groups=") }?.substringAfter("=")?.toIntOrNull() ?: 2
+        val numGroups = args.find { it.startsWith("groups=") }?.substringAfter("=")?.toIntOrNull() ?: 1
         val size = args.find { it.startsWith("size=") }?.substringAfter("=")?.toIntOrNull() ?: 600
         val fileA = args.find { it.startsWith("fileA=") }?.substringAfter("=") ?: "matrixA.bin"
         val fileB = args.find { it.startsWith("fileB=") }?.substringAfter("=") ?: "matrixB.bin"
 
         val world = Mpi.COMM_WORLD
 
-        if (world.rank == 0 && (!File(fileA).exists() || !File(fileB).exists())) {
-            println("[LR8] Generating $size x $size binary matrices...")
+        // Создаем матрицы на КАЖДОМ узле, если их нет
+        if (!File(fileA).exists() || !File(fileB).exists()) {
+            println("[LR8 Rank ${world.rank}] Auto-generating $size x $size binary matrices...")
             createMatrixBinary(fileA, size)
             createMatrixBinary(fileB, size)
         }
         world.barrier()
 
-        // Гарантированное распределение: сначала по 1 процессу в каждую группу, остаток - случайно
         val assignments = IntArray(world.size)
         val actualGroups = minOf(numGroups, world.size)
         for (i in 0 until actualGroups) {
@@ -115,7 +115,7 @@ class MatrixMultGroups {
         val buf = ByteBuffer.allocate(size * 8)
         for (i in 0 until size) {
             buf.clear()
-            repeat(size) { buf.putDouble(Random.nextDouble(1.0, 10.0)) }
+            repeat(size) { buf.putDouble(Random(i.toLong()).nextDouble(1.0, 10.0)) }
             file.writeAt(i * size * 8L, buf.array())
         }
         file.close()
