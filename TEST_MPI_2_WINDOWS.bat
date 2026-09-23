@@ -1,0 +1,6 @@
+@echo off
+echo Starting Worker (Rank 1)...
+start "Worker Rank 1" cmd /k run.bat 7 rank=1 hosts=127.0.0.1,127.0.0.1
+timeout /t 2 >nul
+echo Starting Master (Rank 0)...
+start "Master Rank 0" cmd /k run.bat 7 rank=0 hosts=127.0.0.1,127.0.0.1 size=600 mode=nonblocking
