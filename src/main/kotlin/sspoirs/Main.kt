@@ -57,7 +57,7 @@ private fun printHelp() {
           1 <proto> [port]            = Sequential Server (Lab 1/3)
           2 <proto> [port] [host]     = Client (Lab 1/2)
           3 <proto> [port]            = Thread Pool Server (Lab 4)
-          5 <submode> [args...]       = ICMP Utils (Lab 5: ping, trace, smurf)
+          5 <submode> [args...]       = ICMP Utils (Lab 5: ping, trace, raw)
           6 [manual_ip]               = P2P Chat (Lab 6)
           7 rank=N hosts=h1,h2...     = MPI Matrix Mult (Lab 7)
           8 rank=N hosts=h1,h2...     = MPI Groups & IO (Lab 8)
@@ -137,7 +137,7 @@ private fun generateMatrixFiles(args: List<String>) {
 private fun handleLr5(args: List<String>) {
     val submode = args.getOrNull(0)
     if (submode == null) {
-        println("LR5 Submodes: ping, trace, smurf")
+        println("LR5 Submodes: ping, trace, raw")
         return
     }
 
@@ -146,11 +146,11 @@ private fun handleLr5(args: List<String>) {
         when (submode) {
             "ping" -> icmp.parallelPing(args.drop(1))
             "trace" -> icmp.traceroute(args.getOrNull(1) ?: "8.8.8.8")
-            "smurf" -> {
-                val victim = args.getOrNull(1) ?: return println("Victim IP required")
-                val broadcast = args.getOrNull(2) ?: return println("Broadcast IP required")
+            "raw", "smurf" -> {
+                val src = args.getOrNull(1) ?: return println("Source IP required")
+                val dst = args.getOrNull(2) ?: return println("Destination IP required")
                 val count = args.getOrNull(3)?.toIntOrNull() ?: 10
-                icmp.smurfAttack(victim, broadcast, count)
+                icmp.sendRawIpPacket(src, dst, count)
             }
             else -> println("Unknown submode: $submode")
         }
