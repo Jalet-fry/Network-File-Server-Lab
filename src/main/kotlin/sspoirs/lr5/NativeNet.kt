@@ -34,8 +34,9 @@ interface NativeNet {
     companion object {
         const val AF_INET = 2
         const val SOCK_RAW = 3
-        const val IPPROTO_ICMP = 1
         const val IPPROTO_IP = 0
+        const val IPPROTO_ICMP = 1
+        const val IPPROTO_RAW = 255
         const val MSG_PEEK = 0x2
 
         val instance: NativeNet by lazy {

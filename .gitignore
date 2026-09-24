@@ -18,3 +18,8 @@ local.properties
 ### Runtime files ###
 files-client/
 files-server/
+
+*.bin
+*.zip
+*.pdf
+

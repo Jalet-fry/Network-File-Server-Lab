@@ -1,6 +1,0 @@
-@echo off
-echo Starting Client 1...
-start "Chat Window 1" cmd /k run.bat 6
-timeout /t 2 >nul
-echo Starting Client 2...
-start "Chat Window 2" cmd /k run.bat 6
