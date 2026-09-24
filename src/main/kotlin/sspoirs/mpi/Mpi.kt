@@ -5,9 +5,6 @@ import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 
 object Mpi {
     private var isInitialized = false
@@ -51,83 +48,56 @@ object Mpi {
     private fun establishConnections(myRank: Int, hosts: List<String>): Map<Int, Socket> {
         val connections = ConcurrentHashMap<Int, Socket>()
         val basePort = 10000
-        val targetRank = if (myRank == 0) 1 else 0
-        val targetHost = hosts[targetRank].trim()
-        val targetPort = basePort + targetRank
-        val myPort = basePort + myRank
 
-        val listener = ServerSocket()
-        listener.reuseAddress = true
-        listener.bind(InetSocketAddress(myPort))
-        listener.soTimeout = 45000
+        if (myRank == 0) {
+            // Rank 0 (Windows) — СЕРВЕР: ждет входящее подключение от Rank 1
+            val listener = ServerSocket()
+            listener.reuseAddress = true
+            listener.bind(InetSocketAddress(basePort))
+            listener.soTimeout = 60000
+            println("[MPI Master (Rank 0)] Server listening on port $basePort, waiting for Worker (Rank 1)...")
 
-        println("[MPI Rank $myRank] Listening on port $myPort, target node: Rank $targetRank ($targetHost:$targetPort)")
+            val socket = listener.accept()
+            socket.tcpNoDelay = true
+            socket.soTimeout = Communicator.SOCKET_TIMEOUT_MS.toInt()
 
-        val latch = CountDownLatch(1)
-        val executor = Executors.newFixedThreadPool(2)
+            val remoteRank = socket.getInputStream().read()
+            connections[remoteRank] = socket
+            println("[MPI Master (Rank 0)] -> ACCEPTED connection from Rank $remoteRank!")
+            listener.close()
+        } else {
+            // Rank 1 (Fedora) — КЛИЕНТ: упорно подключается к Rank 0 (Windows)
+            val masterHost = hosts[0].trim()
+            println("[MPI Worker (Rank 1)] Connecting to Master (Rank 0) at $masterHost:$basePort...")
 
-        // Поток 1: Постоянно пробуем подключиться к напарнику
-        executor.submit {
+            var connected = false
             var attempts = 0
-            while (latch.count > 0 && attempts < 30) {
+            while (!connected && attempts < 60) {
                 try {
-                    Thread.sleep(1000)
-                    if (connections.containsKey(targetRank)) break
                     val socket = Socket()
                     socket.tcpNoDelay = true
                     socket.reuseAddress = true
                     socket.soTimeout = Communicator.SOCKET_TIMEOUT_MS.toInt()
-                    socket.connect(InetSocketAddress(targetHost, targetPort), 2000)
+                    socket.connect(InetSocketAddress(masterHost, basePort), 2000)
 
                     socket.getOutputStream().write(myRank)
                     socket.getOutputStream().flush()
 
-                    if (connections.putIfAbsent(targetRank, socket) == null) {
-                        println("[MPI Rank $myRank] -> CONNECTED to Rank $targetRank successfully!")
-                        latch.countDown()
-                    } else {
-                        socket.close()
-                    }
-                    break
+                    connections[0] = socket
+                    connected = true
+                    println("[MPI Worker (Rank 1)] -> CONNECTED to Master (Rank 0) successfully!")
                 } catch (e: Exception) {
                     attempts++
                     if (attempts % 3 == 0) {
-                        println("[MPI Rank $myRank] Waiting for Rank $targetRank at $targetHost:$targetPort (attempt $attempts)...")
+                        println("[MPI Worker (Rank 1)] Still waiting for Master at $masterHost:$basePort (attempt $attempts)...")
                     }
+                    Thread.sleep(1000)
                 }
             }
-        }
 
-        // Поток 2: Одновременно ждем входящего подключения от напарника
-        executor.submit {
-            try {
-                while (latch.count > 0) {
-                    val socket = listener.accept()
-                    socket.tcpNoDelay = true
-                    socket.soTimeout = Communicator.SOCKET_TIMEOUT_MS.toInt()
-
-                    val remoteRank = socket.getInputStream().read()
-                    if (remoteRank != -1) {
-                        if (connections.putIfAbsent(remoteRank, socket) == null) {
-                            println("[MPI Rank $myRank] -> ACCEPTED connection from Rank $remoteRank!")
-                            latch.countDown()
-                        } else {
-                            socket.close()
-                        }
-                        break
-                    }
-                }
-            } catch (e: Exception) {
-                // Timeout or closed
+            if (!connected) {
+                throw RuntimeException("[MPI Worker (Rank 1)] FAILED to connect to Master at $masterHost:$basePort")
             }
-        }
-
-        val connected = latch.await(45, TimeUnit.SECONDS)
-        executor.shutdownNow()
-        try { listener.close() } catch (e: Exception) {}
-
-        if (!connected || !connections.containsKey(targetRank)) {
-            throw RuntimeException("[MPI Rank $myRank] Connection failed! Could not link with Rank $targetRank ($targetHost:$targetPort)")
         }
 
         return connections
