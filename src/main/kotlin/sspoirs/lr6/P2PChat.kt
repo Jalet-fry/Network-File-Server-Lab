@@ -80,7 +80,7 @@ class P2PChat(val params: NetworkDiscovery.NetParams) {
 
         val senderIp = packet.address.hostAddress
 
-        // Если мы вышли из Multicast (/leave), не принимаем Multicast-сообщения!
+        // Если вышли из Multicast (/leave), не принимаем Multicast-сообщения
         if (packetMode == "MCAST" && !inMulticastGroup) {
             return
         }
@@ -160,7 +160,6 @@ class P2PChat(val params: NetworkDiscovery.NetParams) {
 
     fun close() {
         isRunning = false
-        // Принудительно отсылаем EXIT в Broadcast, чтобы все гарантированно увидели отключение
         val prevMode = mode
         mode = ChatMode.BROADCAST
         sendPacket("EXIT", "")
