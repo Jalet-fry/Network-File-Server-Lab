@@ -19,6 +19,7 @@ class P2PChat(val params: NetworkDiscovery.NetParams) {
     val ignoredPeers = CopyOnWriteArraySet<String>()
 
     private var isRunning = true
+    private var inMulticastGroup = true
     var mode = ChatMode.BROADCAST
 
     enum class ChatMode { BROADCAST, MULTICAST }
@@ -66,31 +67,38 @@ class P2PChat(val params: NetworkDiscovery.NetParams) {
 
     private fun handleIncoming(packet: DatagramPacket) {
         val raw = String(packet.data, 0, packet.length, Charsets.UTF_8)
-        val parts = raw.split("|", limit = 3)
-        if (parts.size < 2) return
+        val parts = raw.split("|", limit = 4)
+        if (parts.size < 3) return
 
         val senderId = parts[0]
-        val type = parts[1]
-        val payload = if (parts.size > 2) parts[2] else ""
+        val packetMode = parts[1] // BCAST или MCAST
+        val type = parts[2]
+        val payload = if (parts.size > 3) parts[3] else ""
 
-        // Игнорируем самого себя
+        // Игнорируем свои собственные пакеты
         if (senderId == instanceId) return
 
         val senderIp = packet.address.hostAddress
-        if (ignoredPeers.contains(senderId) || ignoredPeers.contains(senderIp)) return
+
+        // Если мы вышли из Multicast (/leave), не принимаем Multicast-сообщения!
+        if (packetMode == "MCAST" && !inMulticastGroup) {
+            return
+        }
 
         when (type) {
             "HELLO" -> {
-                peers.getOrPut(senderId) { PeerInfo("$senderIp:$senderId") }.lastSeen = System.currentTimeMillis()
+                peers.getOrPut(senderId) { PeerInfo(senderIp) }.lastSeen = System.currentTimeMillis()
             }
             "MSG" -> {
-                println("\n[$senderIp ($senderId)]: $payload")
+                if (ignoredPeers.contains(senderId) || ignoredPeers.contains(senderIp)) return
+                val modeLabel = if (packetMode == "MCAST") "[MULTICAST (239.0.0.1)]" else "[BROADCAST]"
+                println("\n$modeLabel from $senderIp ($senderId): $payload")
                 print("> ")
                 System.out.flush()
             }
             "EXIT" -> {
                 peers.remove(senderId)
-                println("\n[INFO] Peer $senderId ($senderIp) left the chat.")
+                println("\n[SYSTEM INFO] Peer $senderId ($senderIp) disconnected (/exit).")
                 print("> ")
                 System.out.flush()
             }
@@ -100,15 +108,11 @@ class P2PChat(val params: NetworkDiscovery.NetParams) {
     private fun startDiscoveryBeacon() {
         thread(isDaemon = true, name = "DiscoveryBeacon") {
             while (isRunning) {
-                sendDiscovery()
+                sendPacket("HELLO", "")
                 cleanOldPeers()
                 Thread.sleep(3000)
             }
         }
-    }
-
-    private fun sendDiscovery() {
-        sendPacket("HELLO", "")
     }
 
     private fun cleanOldPeers() {
@@ -118,25 +122,23 @@ class P2PChat(val params: NetworkDiscovery.NetParams) {
 
     fun sendMessage(text: String) {
         sendPacket("MSG", text)
-        println("[You]: $text")
+        val modeLabel = if (mode == ChatMode.MULTICAST) "[MULTICAST]" else "[BROADCAST]"
+        println("[You $modeLabel]: $text")
     }
 
     private fun sendPacket(type: String, payload: String) {
         try {
-            val data = "$instanceId|$type|$payload".toByteArray(Charsets.UTF_8)
+            val modeStr = if (mode == ChatMode.MULTICAST) "MCAST" else "BCAST"
+            val data = "$instanceId|$modeStr|$type|$payload".toByteArray(Charsets.UTF_8)
             val targetHost = if (mode == ChatMode.BROADCAST) params.broadcast else multicastGroup
             val addr = InetAddress.getByName(targetHost)
             val packet = DatagramPacket(data, data.size, addr, port)
 
-            // Жестко привязываем сетевую карту перед отправкой
             if (boundInterface != null) {
                 socket.networkInterface = boundInterface
             }
-
-            // Отправляем пакет
             socket.send(packet)
 
-            // Дублирование для локальных тестов на loopback
             if (params.ip == "127.0.0.1") {
                 val loopbackAddr = InetAddress.getByName("127.0.0.1")
                 socket.send(DatagramPacket(data, data.size, loopbackAddr, port))
@@ -148,16 +150,21 @@ class P2PChat(val params: NetworkDiscovery.NetParams) {
 
     fun leaveMulticast() {
         try {
+            inMulticastGroup = false
             socket.leaveGroup(groupAddr)
-            println("Left multicast group $multicastGroup.")
+            println("Successfully left Multicast group $multicastGroup. You will no longer receive multicast messages.")
         } catch (e: Exception) {
-            println("Error: ${e.message}")
+            println("Error leaving group: ${e.message}")
         }
     }
 
     fun close() {
         isRunning = false
+        // Принудительно отсылаем EXIT в Broadcast, чтобы все гарантированно увидели отключение
+        val prevMode = mode
+        mode = ChatMode.BROADCAST
         sendPacket("EXIT", "")
+        mode = prevMode
         try { socket.close() } catch (e: Exception) {}
     }
 }

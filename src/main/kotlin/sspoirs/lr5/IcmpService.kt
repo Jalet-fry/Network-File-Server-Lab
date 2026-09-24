@@ -1,4 +1,4 @@
-package sspoirs.lr5
+﻿package sspoirs.lr5
 
 import com.sun.jna.Memory
 import com.sun.jna.Platform
@@ -20,6 +20,20 @@ class IcmpService : AutoCloseable {
             val err = net.getLastError()
             throw RuntimeException("Failed to create raw socket. Error code: $err. Must run as Admin/Root.")
         }
+        // Жесткий таймаут 800 мс на чтение, чтобы Windows НИКОГДА не зависала
+        setSocketTimeout(800)
+    }
+
+    private fun setSocketTimeout(ms: Int) {
+        val tv = if (Platform.isWindows()) {
+            Memory(4).apply { setInt(0, ms) }
+        } else {
+            Memory(16).apply {
+                setLong(0, (ms / 1000).toLong())
+                setLong(8, ((ms % 1000) * 1000).toLong())
+            }
+        }
+        net.setsockopt(socket, net.getSolSocket(), net.getSoRcvTimeo(), tv, tv.size().toInt())
     }
 
     override fun close() {
@@ -43,17 +57,15 @@ class IcmpService : AutoCloseable {
         }
 
         executor.shutdown()
-        executor.awaitTermination(1, TimeUnit.MINUTES)
+        executor.awaitTermination(5, TimeUnit.SECONDS)
     }
 
     private fun pingHost(host: String): String {
         val targetAddr = InetAddress.getByName(host)
         val id = (Random.nextInt(0, 0xFFFF)).toShort()
-        val seq: Short = 1
-        
         val sendTime = System.currentTimeMillis()
         val payload = ByteBuffer.allocate(8).putLong(sendTime).array()
-        val request = IcmpPacket.createEchoRequest(id, seq, payload).toByteArray()
+        val request = IcmpPacket.createEchoRequest(id, 1, payload).toByteArray()
         
         val dest = NativeNet.SockAddrIn().apply {
             sin_family = NativeNet.AF_INET.toShort()
@@ -61,63 +73,30 @@ class IcmpService : AutoCloseable {
         }
 
         val memReq = Memory(request.size.toLong()).apply { write(0, request, 0, request.size) }
-        val sent = net.sendto(socket, memReq, request.size, 0, dest, dest.size())
-        if (sent < 0) return "Send failed: ${net.getLastError()}"
+        net.sendto(socket, memReq, request.size, 0, dest, dest.size())
 
         val buffer = Memory(65536)
+        val fromAddr = NativeNet.SockAddrIn()
+        val fromLen = IntByReference(fromAddr.size())
         
-        while (System.currentTimeMillis() - sendTime < 3000) {
-            val fromAddr = NativeNet.SockAddrIn()
-            val fromLen = IntByReference(fromAddr.size())
-            val peekFlags = NativeNet.MSG_PEEK or dontWaitFlag
-            val bytesRead = net.recvfrom(socket, buffer, buffer.size().toInt(), peekFlags, fromAddr, fromLen)
-            
+        while (System.currentTimeMillis() - sendTime < 1500) {
+            val bytesRead = net.recvfrom(socket, buffer, buffer.size().toInt(), NativeNet.MSG_PEEK or dontWaitFlag, fromAddr, fromLen)
             if (bytesRead > 0) {
                 val data = buffer.getByteArray(0, bytesRead)
                 val ipHeaderLen = (data[0].toInt() and 0x0F) * 4
-                
                 if (data.size >= ipHeaderLen + 8) {
                     val icmp = try { IcmpPacket.parse(data, ipHeaderLen) } catch (e: Exception) { null }
-                    
-                    if (icmp != null) {
-                        if (icmp.type == IcmpPacket.TYPE_ECHO_REPLY && icmp.identifier == id) {
-                            net.recvfrom(socket, buffer, buffer.size().toInt(), dontWaitFlag, null, IntByReference(0))
-                            val rcvTimestamp = if (icmp.data.size >= 8) ByteBuffer.wrap(icmp.data).long else 0L
-                            val rtt = if (rcvTimestamp > 0) System.currentTimeMillis() - rcvTimestamp else System.currentTimeMillis() - sendTime
-                            val fromIp = InetAddress.getByAddress(fromAddr.sin_addr).hostAddress
-                            return "Reply from $fromIp: bytes=${icmp.data.size} RTT=${rtt}ms"
-                        }
-
-                        val isStale = if (icmp.data.size >= 8) {
-                            val packetTs = ByteBuffer.wrap(icmp.data).long
-                            (System.currentTimeMillis() - packetTs) > 5000
-                        } else false
-
-                        if (isStale || icmp.type != IcmpPacket.TYPE_ECHO_REPLY) {
-                            net.recvfrom(socket, buffer, buffer.size().toInt(), dontWaitFlag, null, IntByReference(0))
-                            continue
-                        }
-                    } else {
+                    if (icmp != null && icmp.type == IcmpPacket.TYPE_ECHO_REPLY && icmp.identifier == id) {
                         net.recvfrom(socket, buffer, buffer.size().toInt(), dontWaitFlag, null, IntByReference(0))
-                        continue
+                        val rtt = System.currentTimeMillis() - sendTime
+                        val fromIp = InetAddress.getByAddress(fromAddr.sin_addr).hostAddress
+                        return "Reply from $fromIp: bytes=${icmp.data.size} RTT=${rtt}ms"
                     }
-                } else {
-                    net.recvfrom(socket, buffer, buffer.size().toInt(), dontWaitFlag, null, IntByReference(0))
-                    continue
                 }
             }
-            Thread.sleep(2)
+            Thread.sleep(5)
         }
-        
         return "Request timed out"
-    }
-
-    private fun flushSocket() {
-        val buffer = Memory(65536)
-        while (true) {
-            val read = net.recvfrom(socket, buffer, buffer.size().toInt(), dontWaitFlag, null, IntByReference(0))
-            if (read <= 0) break
-        }
     }
 
     fun traceroute(host: String, maxHops: Int = 30) {
@@ -128,7 +107,7 @@ class IcmpService : AutoCloseable {
         for (ttl in 1..maxHops) {
             val result = probeHop(targetAddr, ttl)
             println("${ttl.toString().padStart(2)}  $result")
-            if (result.contains("Reached") || result.contains("Echo Reply")) break
+            if (result.contains("Reached")) break
         }
     }
 
@@ -136,7 +115,7 @@ class IcmpService : AutoCloseable {
         val ttlPtr = Memory(4).apply { setInt(0, ttl) }
         net.setsockopt(socket, net.getIpProtoIp(), net.getIpTtl(), ttlPtr, 4)
         
-        val id = (ttl + 1000).toShort()
+        val id = (ttl + 2000).toShort()
         val startTime = System.currentTimeMillis()
         val payload = ByteBuffer.allocate(8).putLong(startTime).array()
         val request = IcmpPacket.createEchoRequest(id, 1, payload).toByteArray()
@@ -153,7 +132,7 @@ class IcmpService : AutoCloseable {
         val fromAddr = NativeNet.SockAddrIn()
         val fromLen = IntByReference(fromAddr.size())
 
-        while (System.currentTimeMillis() - startTime < 2000) {
+        while (System.currentTimeMillis() - startTime < 1000) {
             val bytesRead = net.recvfrom(socket, buffer, buffer.size().toInt(), dontWaitFlag, fromAddr, fromLen)
             if (bytesRead > 0) {
                 val endTime = System.currentTimeMillis()
@@ -164,26 +143,31 @@ class IcmpService : AutoCloseable {
                 if (icmp != null) {
                     val hopIp = InetAddress.getByAddress(fromAddr.sin_addr).hostAddress
                     val rtt = endTime - startTime
-                    
-                    when (icmp.type) {
-                        IcmpPacket.TYPE_ECHO_REPLY -> {
-                            if (icmp.identifier == id) return "$hopIp (Reached) - $rtt ms"
-                        }
-                        IcmpPacket.TYPE_TIME_EXCEEDED -> return "$hopIp - $rtt ms"
-                        IcmpPacket.TYPE_DEST_UNREACHABLE -> return "$hopIp (Unreachable) - $rtt ms"
+                    if (icmp.type == IcmpPacket.TYPE_ECHO_REPLY && icmp.identifier == id) {
+                        return "$hopIp (Reached) - $rtt ms"
+                    }
+                    if (icmp.type == IcmpPacket.TYPE_TIME_EXCEEDED) {
+                        return "$hopIp - $rtt ms"
                     }
                 }
             }
-            Thread.sleep(2)
+            Thread.sleep(5)
         }
         return "* * *"
+    }
+
+    private fun flushSocket() {
+        val buffer = Memory(65536)
+        while (true) {
+            val read = net.recvfrom(socket, buffer, buffer.size().toInt(), 0x40, null, IntByReference(0))
+            if (read <= 0) break
+        }
     }
 
     fun sendRawIpPacket(sourceIp: String, destIp: String, count: Int = 10) {
         val rawSocket = net.socket(NativeNet.AF_INET, NativeNet.SOCK_RAW, NativeNet.IPPROTO_RAW)
         if (rawSocket < 0) {
-            val err = net.getLastError()
-            println("[ERROR] Failed to open IPPROTO_RAW socket (errno: $err). Must run as root/admin.")
+            println("[ERROR] Failed to open IPPROTO_RAW, errno: ${net.getLastError()}")
             return
         }
 
@@ -204,14 +188,11 @@ class IcmpService : AutoCloseable {
         val memPacket = Memory(packet.size.toLong()).apply { write(0, packet, 0, packet.size) }
 
         repeat(count) {
-            val res = net.sendto(rawSocket, memPacket, packet.size, 0, dest, dest.size())
-            if (res < 0) {
-                println("[WARN] sendto failed (errno: ${net.getLastError()})")
-            }
+            net.sendto(rawSocket, memPacket, packet.size, 0, dest, dest.size())
             Thread.sleep(50)
         }
         
         net.close(rawSocket)
-        println("Raw packet transmission finished.")
+        println("Transmission finished.")
     }
 }
