@@ -23,7 +23,6 @@ object Mpi {
             ?: args.getOrNull(0)?.toIntOrNull()
             ?: throw IllegalArgumentException("MPI Init: 'rank' argument missing. Use rank=N or pass number.")
 
-        // Если hosts не передан через аргументы, читаем из файла hosts.txt!
         val hosts = args.find { it.startsWith("hosts=") }?.substringAfter("=")?.split(",")
             ?: loadHostsFromFile()
 
@@ -52,82 +51,85 @@ object Mpi {
     private fun establishConnections(myRank: Int, hosts: List<String>): Map<Int, Socket> {
         val connections = ConcurrentHashMap<Int, Socket>()
         val basePort = 10000
-        val latch = CountDownLatch(hosts.size - 1)
+        val targetRank = if (myRank == 0) 1 else 0
+        val targetHost = hosts[targetRank].trim()
+        val targetPort = basePort + targetRank
+        val myPort = basePort + myRank
 
         val listener = ServerSocket()
         listener.reuseAddress = true
-        listener.bind(InetSocketAddress(basePort + myRank))
-        listener.soTimeout = 60000 // 60 секунд на ожидание подключения
+        listener.bind(InetSocketAddress(myPort))
+        listener.soTimeout = 45000
 
-        println("[MPI Rank $myRank] Server listening on port ${basePort + myRank}...")
+        println("[MPI Rank $myRank] Listening on port $myPort, target node: Rank $targetRank ($targetHost:$targetPort)")
 
-        val executor = Executors.newFixedThreadPool(hosts.size)
+        val latch = CountDownLatch(1)
+        val executor = Executors.newFixedThreadPool(2)
 
-        // 1. Подключаемся к узлам с меньшим рангом
-        for (i in 0 until myRank) {
-            val targetRank = i
-            val targetHost = hosts[targetRank]
-            val targetPort = basePort + targetRank
-            executor.submit {
-                var connected = false
-                var attempts = 0
-                while (!connected && attempts < 60) {
-                    try {
-                        val socket = Socket()
-                        socket.tcpNoDelay = true
-                        socket.soTimeout = Communicator.SOCKET_TIMEOUT_MS.toInt()
-                        socket.connect(InetSocketAddress(targetHost, targetPort), 2000)
+        // Поток 1: Постоянно пробуем подключиться к напарнику
+        executor.submit {
+            var attempts = 0
+            while (latch.count > 0 && attempts < 30) {
+                try {
+                    Thread.sleep(1000)
+                    if (connections.containsKey(targetRank)) break
+                    val socket = Socket()
+                    socket.tcpNoDelay = true
+                    socket.reuseAddress = true
+                    socket.soTimeout = Communicator.SOCKET_TIMEOUT_MS.toInt()
+                    socket.connect(InetSocketAddress(targetHost, targetPort), 2000)
 
-                        socket.getOutputStream().write(myRank)
-                        socket.getOutputStream().flush()
+                    socket.getOutputStream().write(myRank)
+                    socket.getOutputStream().flush()
 
-                        connections[targetRank] = socket
-                        connected = true
-                        println("[MPI Rank $myRank] -> CONNECTED to Rank $targetRank ($targetHost:$targetPort)!")
+                    if (connections.putIfAbsent(targetRank, socket) == null) {
+                        println("[MPI Rank $myRank] -> CONNECTED to Rank $targetRank successfully!")
                         latch.countDown()
-                    } catch (e: Exception) {
-                        attempts++
-                        if (attempts % 5 == 0) {
-                            println("[MPI Rank $myRank] Still trying to connect to Rank $targetRank ($targetHost:$targetPort): ${e.message}")
-                        }
-                        Thread.sleep(1000)
+                    } else {
+                        socket.close()
                     }
-                }
-                if (!connected) {
-                    println("[MPI Rank $myRank] FAILED to connect to Rank $targetRank!")
+                    break
+                } catch (e: Exception) {
+                    attempts++
+                    if (attempts % 3 == 0) {
+                        println("[MPI Rank $myRank] Waiting for Rank $targetRank at $targetHost:$targetPort (attempt $attempts)...")
+                    }
                 }
             }
         }
 
-        // 2. Принимаем подключения от узлов с большим рангом
-        val acceptThread = Thread {
-            for (i in (myRank + 1) until hosts.size) {
-                try {
-                    println("[MPI Rank $myRank] Waiting for Rank $i to connect...")
+        // Поток 2: Одновременно ждем входящего подключения от напарника
+        executor.submit {
+            try {
+                while (latch.count > 0) {
                     val socket = listener.accept()
                     socket.tcpNoDelay = true
                     socket.soTimeout = Communicator.SOCKET_TIMEOUT_MS.toInt()
 
                     val remoteRank = socket.getInputStream().read()
                     if (remoteRank != -1) {
-                        connections[remoteRank] = socket
-                        println("[MPI Rank $myRank] -> ACCEPTED connection from Rank $remoteRank!")
-                        latch.countDown()
+                        if (connections.putIfAbsent(remoteRank, socket) == null) {
+                            println("[MPI Rank $myRank] -> ACCEPTED connection from Rank $remoteRank!")
+                            latch.countDown()
+                        } else {
+                            socket.close()
+                        }
+                        break
                     }
-                } catch (e: Exception) {
-                    println("[MPI Rank $myRank] Accept error: ${e.message}")
                 }
+            } catch (e: Exception) {
+                // Timeout or closed
             }
         }
-        acceptThread.start()
 
-        val success = latch.await(65, TimeUnit.SECONDS)
-        if (!success) {
-            println("[MPI Rank $myRank] TIMEOUT: Not all ranks connected in 60s! Active: ${connections.keys}")
+        val connected = latch.await(45, TimeUnit.SECONDS)
+        executor.shutdownNow()
+        try { listener.close() } catch (e: Exception) {}
+
+        if (!connected || !connections.containsKey(targetRank)) {
+            throw RuntimeException("[MPI Rank $myRank] Connection failed! Could not link with Rank $targetRank ($targetHost:$targetPort)")
         }
 
-        executor.shutdown()
-        listener.close()
         return connections
     }
 
