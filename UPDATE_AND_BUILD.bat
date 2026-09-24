@@ -1,14 +1,16 @@
 @echo off
-echo === Windows Auto Update ^& Build ===
+chcp 65001 >nul
+cd /d "%~dp0"
+echo === Windows Hard Update ^& Build ===
 
-rem 1. Тянем изменения из репозитория
-echo [1/2] Pulling latest changes from Git...
-git pull
+echo [1/3] Жесткий сброс к origin/main...
+git fetch origin main
+git reset --hard origin/main
+git clean -fd
 
-rem 2. Запускаем сборку
-echo [2/2] Starting build process...
+echo [2/3] Запуск сборки проекта...
 call BUILD_PROJECT.bat
 
 echo ==================================
-echo DONE! You can now start the server with: run.bat
+echo ГОТОВО! Репозиторий полностью синхронизирован.
 pause
