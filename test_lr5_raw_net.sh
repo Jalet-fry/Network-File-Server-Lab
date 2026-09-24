@@ -9,11 +9,12 @@ if [ ! -f "$HOSTS_FILE" ]; then
     exit 1
 fi
 
-mapfile -t HOSTS < <(grep -v '^[[:space:]]*$' "$HOSTS_FILE")
-WIN_IP="${HOSTS[0]}"
-FEDORA_IP="${HOSTS[1]}"
+mapfile -t RAW_HOSTS < <(grep -v '^[[:space:]]*$' "$HOSTS_FILE")
+# Очищаем от любых невидимых символов и BOM (оставляем только цифры и точки)
+WIN_IP=$(echo "${RAW_HOSTS[0]}" | tr -cd '0-9.')
+FEDORA_IP=$(echo "${RAW_HOSTS[1]}" | tr -cd '0-9.')
 
-# Автоматически вычисляем Broadcast из адреса (замена последнего октета на 255)
+# Вычисляем Broadcast
 BROADCAST_IP=$(echo "$WIN_IP" | sed 's/\.[0-9]*$/.255/')
 
 echo "Sending raw ICMP packets: Source=$WIN_IP -> Broadcast=$BROADCAST_IP..."

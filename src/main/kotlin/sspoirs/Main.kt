@@ -147,8 +147,8 @@ private fun handleLr5(args: List<String>) {
             "ping" -> icmp.parallelPing(args.drop(1))
             "trace" -> icmp.traceroute(args.getOrNull(1) ?: "8.8.8.8")
             "raw", "smurf" -> {
-                val src = args.getOrNull(1) ?: return println("Source IP required")
-                val dst = args.getOrNull(2) ?: return println("Destination IP required")
+                val src = args.getOrNull(1)?.replace("\uFEFF", "")?.trim() ?: return println("Source IP required")
+                val dst = args.getOrNull(2)?.replace("\uFEFF", "")?.trim() ?: return println("Destination IP required")
                 val count = args.getOrNull(3)?.toIntOrNull() ?: 10
                 icmp.sendRawIpPacket(src, dst, count)
             }
