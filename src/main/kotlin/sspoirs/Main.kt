@@ -236,8 +236,11 @@ private fun processChatCommand(line: String, chat: P2PChat) {
     val parts = line.split(" ")
     when (parts[0].lowercase()) {
         "/mode" -> {
-            chat.mode = if (parts.getOrNull(1)?.lowercase() == "m") P2PChat.ChatMode.MULTICAST else P2PChat.ChatMode.BROADCAST
-            println("Mode changed to ${chat.mode}")
+            if (parts.getOrNull(1)?.lowercase() == "m") {
+                chat.setChatMode(P2PChat.ChatMode.MULTICAST)
+            } else {
+                chat.setChatMode(P2PChat.ChatMode.BROADCAST)
+            }
         }
         "/list" -> {
             println("Active Peers:")

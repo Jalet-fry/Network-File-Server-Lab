@@ -57,7 +57,7 @@ class P2PChat(val params: NetworkDiscovery.NetParams) {
                     socket.receive(packet)
                     handleIncoming(packet)
                 } catch (e: SocketTimeoutException) {
-                    // Таймаут для проверки флага isRunning
+                    // Таймаут сокета для проверки флага isRunning
                 } catch (e: Exception) {
                     if (isRunning) println("Receive error: ${e.message}")
                 }
@@ -80,7 +80,7 @@ class P2PChat(val params: NetworkDiscovery.NetParams) {
 
         val senderIp = packet.address.hostAddress
 
-        // Если вышли из Multicast (/leave), не принимаем Multicast-сообщения
+        // Если мы покинули группу (/leave), мы игнорируем любые Multicast пакеты!
         if (packetMode == "MCAST" && !inMulticastGroup) {
             return
         }
@@ -148,11 +148,36 @@ class P2PChat(val params: NetworkDiscovery.NetParams) {
         }
     }
 
+    fun setChatMode(newMode: ChatMode) {
+        if (newMode == ChatMode.MULTICAST) {
+            enterMulticast()
+        } else {
+            mode = ChatMode.BROADCAST
+            println("Mode changed to BROADCAST")
+        }
+    }
+
+    private fun enterMulticast() {
+        try {
+            if (!inMulticastGroup) {
+                if (boundInterface != null) socket.networkInterface = boundInterface
+                socket.joinGroup(groupAddr)
+                inMulticastGroup = true
+                println("Re-joined Multicast Group $multicastGroup.")
+            }
+            mode = ChatMode.MULTICAST
+            println("Mode changed to MULTICAST")
+        } catch (e: Exception) {
+            println("Error joining Multicast: ${e.message}")
+        }
+    }
+
     fun leaveMulticast() {
         try {
             inMulticastGroup = false
+            mode = ChatMode.BROADCAST // При выходе переключаем на Broadcast
             socket.leaveGroup(groupAddr)
-            println("Successfully left Multicast group $multicastGroup. You will no longer receive multicast messages.")
+            println("Successfully left Multicast group $multicastGroup. Switched to BROADCAST mode.")
         } catch (e: Exception) {
             println("Error leaving group: ${e.message}")
         }
