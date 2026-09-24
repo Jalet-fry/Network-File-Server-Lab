@@ -9,10 +9,11 @@ import kotlin.concurrent.thread
 class P2PChat(val params: NetworkDiscovery.NetParams) {
     private val port = 9999
     private val multicastGroup = "239.0.0.1"
-    val instanceId: String = UUID.randomUUID().toString().take(6) // Уникальный ID для работы на одной машине!
+    val instanceId: String = UUID.randomUUID().toString().take(6)
 
     private val socket: MulticastSocket
     private val groupAddr = InetAddress.getByName(multicastGroup)
+    private val boundInterface: NetworkInterface? = NetworkInterface.getByName(params.interfaceName)
 
     val peers = ConcurrentHashMap<String, PeerInfo>()
     val ignoredPeers = CopyOnWriteArraySet<String>()
@@ -27,16 +28,14 @@ class P2PChat(val params: NetworkDiscovery.NetParams) {
             reuseAddress = true
             broadcast = true
             try {
-                // Включаем прием локальных пакетов (loopback), чтобы 2 окна на 1 ПК видели друг друга
                 setLoopbackMode(false)
             } catch (e: Exception) {}
             soTimeout = 1000
         }
 
         try {
-            val ni = NetworkInterface.getByName(params.interfaceName)
-            if (ni != null) {
-                socket.networkInterface = ni
+            if (boundInterface != null) {
+                socket.networkInterface = boundInterface
             }
             socket.joinGroup(groupAddr)
             println("[$instanceId] Joined Multicast Group $multicastGroup on ${params.interfaceName}")
@@ -57,7 +56,7 @@ class P2PChat(val params: NetworkDiscovery.NetParams) {
                     socket.receive(packet)
                     handleIncoming(packet)
                 } catch (e: SocketTimeoutException) {
-                    // Таймаут сокета для проверки флага isRunning
+                    // Таймаут для проверки флага isRunning
                 } catch (e: Exception) {
                     if (isRunning) println("Receive error: ${e.message}")
                 }
@@ -66,7 +65,7 @@ class P2PChat(val params: NetworkDiscovery.NetParams) {
     }
 
     private fun handleIncoming(packet: DatagramPacket) {
-        val raw = String(packet.data, 0, packet.length)
+        val raw = String(packet.data, 0, packet.length, Charsets.UTF_8)
         val parts = raw.split("|", limit = 3)
         if (parts.size < 2) return
 
@@ -74,7 +73,7 @@ class P2PChat(val params: NetworkDiscovery.NetParams) {
         val type = parts[1]
         val payload = if (parts.size > 2) parts[2] else ""
 
-        // Игнорируем только самого себя по instanceId! Другие окна на этом же ПК будут приняты!
+        // Игнорируем самого себя
         if (senderId == instanceId) return
 
         val senderIp = packet.address.hostAddress
@@ -91,7 +90,7 @@ class P2PChat(val params: NetworkDiscovery.NetParams) {
             }
             "EXIT" -> {
                 peers.remove(senderId)
-                println("\n[INFO] Peer $senderId left the chat.")
+                println("\n[INFO] Peer $senderId ($senderIp) left the chat.")
                 print("> ")
                 System.out.flush()
             }
@@ -124,15 +123,24 @@ class P2PChat(val params: NetworkDiscovery.NetParams) {
 
     private fun sendPacket(type: String, payload: String) {
         try {
-            val data = "$instanceId|$type|$payload".toByteArray()
+            val data = "$instanceId|$type|$payload".toByteArray(Charsets.UTF_8)
             val targetHost = if (mode == ChatMode.BROADCAST) params.broadcast else multicastGroup
             val addr = InetAddress.getByName(targetHost)
             val packet = DatagramPacket(data, data.size, addr, port)
+
+            // Жестко привязываем сетевую карту перед отправкой
+            if (boundInterface != null) {
+                socket.networkInterface = boundInterface
+            }
+
+            // Отправляем пакет
             socket.send(packet)
 
-            // Дублируем на 127.0.0.1 для 100% надежности при тесте на одной машине
-            val loopbackAddr = InetAddress.getByName("127.0.0.1")
-            socket.send(DatagramPacket(data, data.size, loopbackAddr, port))
+            // Дублирование для локальных тестов на loopback
+            if (params.ip == "127.0.0.1") {
+                val loopbackAddr = InetAddress.getByName("127.0.0.1")
+                socket.send(DatagramPacket(data, data.size, loopbackAddr, port))
+            }
         } catch (e: Exception) {
             // ignore
         }
@@ -141,7 +149,7 @@ class P2PChat(val params: NetworkDiscovery.NetParams) {
     fun leaveMulticast() {
         try {
             socket.leaveGroup(groupAddr)
-            println("Left multicast group.")
+            println("Left multicast group $multicastGroup.")
         } catch (e: Exception) {
             println("Error: ${e.message}")
         }

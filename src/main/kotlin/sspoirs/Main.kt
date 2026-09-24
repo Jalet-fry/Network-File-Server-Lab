@@ -218,8 +218,11 @@ private fun handleLr6(args: List<String>) {
 
     while (true) {
         print("> ")
-        val line = readLine() ?: break
-        if (line == "/exit") break
+        val rawLine = readLine() ?: break
+        val line = rawLine.trim()
+        if (line.isEmpty()) continue
+        if (line.equals("/exit", ignoreCase = true) || line.equals("exit", ignoreCase = true)) break
+
         if (line.startsWith("/")) {
             processChatCommand(line, chat)
         } else {
@@ -231,19 +234,26 @@ private fun handleLr6(args: List<String>) {
 
 private fun processChatCommand(line: String, chat: P2PChat) {
     val parts = line.split(" ")
-    when (parts[0]) {
+    when (parts[0].lowercase()) {
         "/mode" -> {
-            chat.mode = if (parts.getOrNull(1) == "m") P2PChat.ChatMode.MULTICAST else P2PChat.ChatMode.BROADCAST
+            chat.mode = if (parts.getOrNull(1)?.lowercase() == "m") P2PChat.ChatMode.MULTICAST else P2PChat.ChatMode.BROADCAST
             println("Mode changed to ${chat.mode}")
         }
         "/list" -> {
             println("Active Peers:")
-            chat.peers.keys().toList().forEach { println(" - $it") }
+            if (chat.peers.isEmpty()) {
+                println("  (No peers discovered yet)")
+            } else {
+                chat.peers.forEach { (id, peer) -> println(" - IP: ${peer.ip}, ID: $id") }
+            }
         }
         "/ignore" -> {
-            parts.getOrNull(1)?.let {
-                chat.ignoredPeers.add(it)
-                println("Ignoring $it")
+            val target = parts.getOrNull(1)
+            if (target != null) {
+                chat.ignoredPeers.add(target)
+                println("Ignoring messages from $target")
+            } else {
+                println("Usage: /ignore <ip_or_id>")
             }
         }
         "/leave" -> chat.leaveMulticast()

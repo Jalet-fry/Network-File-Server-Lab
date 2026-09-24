@@ -121,6 +121,7 @@ class IcmpService : AutoCloseable {
     }
 
     fun traceroute(host: String, maxHops: Int = 30) {
+        flushSocket()
         val targetAddr = InetAddress.getByName(host)
         println("Traceroute to $host (${targetAddr.hostAddress}), $maxHops hops max:")
 
