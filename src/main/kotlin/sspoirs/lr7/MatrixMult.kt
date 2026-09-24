@@ -7,8 +7,8 @@ import java.io.Serializable
 class MatrixMult {
 
     fun run(args: List<String>) {
-        val size = args.find { it.startsWith("size=") }?.substringAfter("=")?.toIntOrNull() ?: 600
-        val mode = args.find { it.startsWith("mode=") }?.substringAfter("=") ?: "blocking"
+        val size = args.find { it.startsWith("size=") }?.substringAfter("=")?.toIntOrNull() ?: 800
+        val mode = args.find { it.startsWith("mode=") }?.substringAfter("=") ?: "nonblocking"
         val comm = Mpi.COMM_WORLD
 
         if (comm.rank == 0) {
@@ -25,7 +25,7 @@ class MatrixMult {
         val b = Array(size) { DoubleArray(size) { (1..9).random().toDouble() } }
         val c = Array(size) { DoubleArray(size) }
 
-        // Рассылка матрицы B всем подчиненным процессам
+        // Рассылка матрицы B
         for (i in 1 until comm.size) {
             comm.send(i, TAG_B, b)
         }
@@ -36,13 +36,13 @@ class MatrixMult {
         if (comm.size == 1) {
             multiplySingleNode(a, b, c, 0, size)
         } else if (mode.lowercase() == "blocking") {
-            runBlocking(a, c, size)
+            runBlockingChuncked(a, c, size)
         } else {
-            runNonBlocking(a, c, size)
+            runNonBlockingChunked(a, c, size)
         }
 
         val duration = System.currentTimeMillis() - startTime
-        println("[LR7 Master] Execution finished in: ${duration}ms (${duration / 1000.0}s)")
+        println("[BENCHMARK_RESULT] Mode: $mode -> Time: ${duration}ms (${duration / 1000.0}s)")
 
         verifyResult(a, b, c, size)
 
@@ -52,36 +52,34 @@ class MatrixMult {
         }
     }
 
-    private fun runBlocking(a: Array<DoubleArray>, c: Array<DoubleArray>, size: Int) {
+    private fun runBlockingChuncked(a: Array<DoubleArray>, c: Array<DoubleArray>, size: Int) {
         val comm = Mpi.COMM_WORLD
-        val numWorkers = comm.size - 1
-        val (starts, counts) = calculateBlockRanges(size, numWorkers)
+        val numChunks = 8
+        val (starts, counts) = calculateBlockRanges(size, numChunks)
 
-        for (w in 0 until numWorkers) {
-            val workerRank = w + 1
-            val chunk = Array(counts[w]) { a[starts[w] + it] }
-            comm.send(workerRank, TAG_CHUNK_DATA, ChunkData(starts[w], chunk))
-
-            val res = comm.recv(workerRank, TAG_RESULT) as ChunkResult
+        // Последовательно: отправил кусок -> заблокировался и ждешь ответ
+        for (i in 0 until numChunks) {
+            val chunk = Array(counts[i]) { a[starts[i] + it] }
+            comm.send(1, TAG_CHUNK_DATA, ChunkData(starts[i], chunk))
+            val res = comm.recv(1, TAG_RESULT) as ChunkResult
             copyChunkToResult(c, res)
         }
     }
 
-    private fun runNonBlocking(a: Array<DoubleArray>, c: Array<DoubleArray>, size: Int) {
+    private fun runNonBlockingChunked(a: Array<DoubleArray>, c: Array<DoubleArray>, size: Int) {
         val comm = Mpi.COMM_WORLD
-        val numWorkers = comm.size - 1
-        val (starts, counts) = calculateBlockRanges(size, numWorkers)
+        val numChunks = 8
+        val (starts, counts) = calculateBlockRanges(size, numChunks)
         val requests = mutableListOf<MpiRequest>()
 
-        // Асинхронная отправка всех блоков воркерам
-        for (w in 0 until numWorkers) {
-            val workerRank = w + 1
-            val chunk = Array(counts[w]) { a[starts[w] + it] }
-            comm.isend(workerRank, TAG_CHUNK_DATA, ChunkData(starts[w], chunk))
-            requests.add(comm.irecv(workerRank, TAG_RESULT))
+        // Асинхронно: пуляем все запросы в сеть без блокировки
+        for (i in 0 until numChunks) {
+            val chunk = Array(counts[i]) { a[starts[i] + it] }
+            comm.isend(1, TAG_CHUNK_DATA, ChunkData(starts[i], chunk))
+            requests.add(comm.irecv(1, TAG_RESULT))
         }
 
-        // Асинхронный сбор ответов
+        // Параллельно собираем результаты
         for (req in requests) {
             val res = req.wait() as ChunkResult
             copyChunkToResult(c, res)
