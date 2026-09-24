@@ -1,2 +1,8 @@
 #!/bin/bash
-./run.sh 7 rank=1 hosts=10.220.155.14,10.220.155.244
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+mapfile -t RAW_HOSTS < <(grep -v '^[[:space:]]*$' "$SCRIPT_DIR/hosts.txt")
+WIN_IP=$(echo "${RAW_HOSTS[0]}" | tr -cd '0-9.')
+FEDORA_IP=$(echo "${RAW_HOSTS[1]}" | tr -cd '0-9.')
+
+echo "Ожидание задачи от Master (Windows: $WIN_IP)..."
+"$SCRIPT_DIR/run.sh" 7 rank=1 hosts="$WIN_IP,$FEDORA_IP"

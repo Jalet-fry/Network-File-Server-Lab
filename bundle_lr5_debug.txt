@@ -1,0 +1,999 @@
+﻿==================================================
+FILE: Network-File-Server-Lab\hosts.txt
+==================================================
+10.245.30.14
+10.245.30.118
+
+
+
+==================================================
+FILE: Network-File-Server-Lab\Test-LR5-Net.ps1
+==================================================
+$hostsFile = Join-Path $PSScriptRoot "hosts.txt"
+if (-not (Test-Path $hostsFile)) { $hostsFile = "hosts.txt" }
+$hosts = Get-Content $hostsFile | Where-Object { $_.Trim() -ne "" }
+$winIp = $hosts[0].Trim()
+$fedoraIp = $hosts[1].Trim()
+
+Write-Host "=== [1/2] PARALLEL PING (Fedora: $fedoraIp, Google: 8.8.8.8) ===" -ForegroundColor Cyan
+cmd.exe /c run.bat 5 ping $fedoraIp 8.8.8.8
+Write-Host "`n=== [2/2] TRACEROUTE (Google: 8.8.8.8) ===" -ForegroundColor Cyan
+cmd.exe /c run.bat 5 trace 8.8.8.8
+Write-Host "`n[!] Raw test: friend launches on Fedora via: ./test_lr5_raw_net.sh" -ForegroundColor Yellow
+
+
+==================================================
+FILE: Network-File-Server-Lab\Test-LR5-Local.ps1
+==================================================
+Write-Host '=== [1/2] PARALLEL PING ===' -ForegroundColor Cyan
+cmd.exe /c run.bat 5 ping 8.8.8.8 1.1.1.1 127.0.0.1
+Write-Host '`n=== [2/2] TRACEROUTE ===' -ForegroundColor Cyan
+cmd.exe /c run.bat 5 trace 8.8.8.8
+Write-Host '`n[!] Raw test launch in WSL via: ./test_lr5_raw_local.sh' -ForegroundColor Yellow
+
+
+==================================================
+FILE: Network-File-Server-Lab\test_lr5_raw_net.sh
+==================================================
+#!/bin/bash
+[ "$EUID" -ne 0 ] && exec sudo bash "$0" "$@"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HOSTS_FILE="$SCRIPT_DIR/hosts.txt"
+
+if [ ! -f "$HOSTS_FILE" ]; then
+    echo "hosts.txt not found!"
+    exit 1
+fi
+
+mapfile -t RAW_HOSTS < <(grep -v '^[[:space:]]*$' "$HOSTS_FILE")
+# Очищаем от любых невидимых символов и BOM (оставляем только цифры и точки)
+WIN_IP=$(echo "${RAW_HOSTS[0]}" | tr -cd '0-9.')
+FEDORA_IP=$(echo "${RAW_HOSTS[1]}" | tr -cd '0-9.')
+
+# Вычисляем Broadcast
+BROADCAST_IP=$(echo "$WIN_IP" | sed 's/\.[0-9]*$/.255/')
+
+echo "Sending raw ICMP packets: Source=$WIN_IP -> Broadcast=$BROADCAST_IP..."
+"$SCRIPT_DIR/run.sh" 5 raw "$WIN_IP" "$BROADCAST_IP" 10
+
+
+==================================================
+FILE: Network-File-Server-Lab\test_lr5_raw_local.sh
+==================================================
+#!/bin/bash
+[ "$EUID" -ne 0 ] && exec sudo bash "$0" "$@"
+echo 'Sending raw ICMP packets with Source IP 127.0.0.1...'
+./run.sh 5 raw 127.0.0.1 127.0.0.1 10
+
+
+==================================================
+FILE: Network-File-Server-Lab\run.bat
+==================================================
+@echo off
+setlocal enabledelayedexpansion
+
+echo ========================================
+echo Network File Server (SSPOiRS)
+echo ========================================
+
+set APP_BIN=build\install\Network-File-Server-Lab\bin\Network-File-Server-Lab.bat
+
+if not exist %APP_BIN% (
+    echo [ERROR] Application not found. Please run BUILD_PROJECT.bat first.
+    exit /b
+)
+
+if "%1"=="6" (
+    echo Starting P2P Chat...
+    echo If auto-detection fails, you can specify IP manually:
+    echo run.bat 6 192.168.1.100
+    echo.
+)
+
+call %APP_BIN% %*
+
+
+
+==================================================
+FILE: Network-File-Server-Lab\run.sh
+==================================================
+#!/bin/bash
+APP_BIN="build/install/Network-File-Server-Lab/bin/Network-File-Server-Lab"
+if [ ! -f "$APP_BIN" ]; then
+    echo "Error: Application not built. Run ./BUILD_PROJECT.sh first."
+    exit 1
+fi
+chmod +x "$APP_BIN"
+./$APP_BIN "$@"
+
+
+
+==================================================
+FILE: Network-File-Server-Lab\src\main\kotlin\sspoirs\Main.kt
+==================================================
+package sspoirs
+
+import sspoirs.common.Constants
+import sspoirs.lr1.SimpleClient
+import sspoirs.lr1.TcpCommandServer
+import sspoirs.lr2.UdpClient
+import sspoirs.lr2.UdpServer
+import sspoirs.lr4.TcpThreadPoolServer
+import sspoirs.lr5.IcmpService
+import sspoirs.lr6.NetworkDiscovery
+import sspoirs.lr6.P2PChat
+import sspoirs.lr7.MatrixMult
+import sspoirs.lr8.MatrixMultGroups
+import sspoirs.mpi.Mpi
+import java.io.RandomAccessFile
+import java.nio.ByteBuffer
+
+fun main(args: Array<String>) {
+    Constants.initDirs()
+
+    if (args.isEmpty()) {
+        printHelp()
+        return
+    }
+
+    val mode = args.getOrNull(0)
+    val protocolStr = args.getOrNull(1) ?: "1"
+    val protocol = if (protocolStr == "2") Constants.Protocol.UDP else Constants.Protocol.TCP
+    val port = args.getOrNull(2)?.toIntOrNull() ?: Constants.DEFAULT_PORT
+
+    println("=== Network File Server (SSPOiRS) ===")
+
+    when (mode) {
+        "1" -> startServer(protocol, port, isThreadPool = false)
+        "3" -> startServer(protocol, port, isThreadPool = true)
+        "2" -> startClient(protocol, port, args.getOrNull(3) ?: Constants.DEFAULT_HOST)
+        "5" -> handleLr5(args.drop(1))
+        "6" -> handleLr6(args.drop(1))
+        "7" -> handleLr7(args.drop(1))
+        "8" -> handleLr8(args.drop(1))
+        "mpirun" -> handleLocalMpiRun(args.drop(1))
+        "gen" -> generateMatrixFiles(args.drop(1))
+        "list-ifaces" -> {
+            println("Available interfaces:")
+            NetworkDiscovery.listInterfaces().forEachIndexed { idx, p ->
+                println("  $idx: ${p.interfaceName} - IP: ${p.ip}, Broadcast: ${p.broadcast}")
+            }
+        }
+        else -> printHelp()
+    }
+}
+
+private fun printHelp() {
+    println("""
+        Usage: run.bat <mode> [args...]
+        MODES:
+          1 <proto> [port]            = Sequential Server (Lab 1/3)
+          2 <proto> [port] [host]     = Client (Lab 1/2)
+          3 <proto> [port]            = Thread Pool Server (Lab 4)
+          5 <submode> [args...]       = ICMP Utils (Lab 5: ping, trace, raw)
+          6 [manual_ip]               = P2P Chat (Lab 6)
+          7 rank=N hosts=h1,h2...     = MPI Matrix Mult (Lab 7)
+          8 rank=N hosts=h1,h2...     = MPI Groups & IO (Lab 8)
+          mpirun <np> <mode 7|8> [...] = Auto-launch N local processes for MPI
+          gen size=N                  = Generate binary matrix files
+          list-ifaces                 = List available network interfaces
+    """.trimIndent())
+}
+
+private fun handleLocalMpiRun(args: List<String>) {
+    val np = args.getOrNull(0)?.toIntOrNull() ?: 3
+    val targetMode = args.getOrNull(1) ?: "7"
+    val restArgs = args.drop(2)
+
+    val hosts = (0 until np).joinToString(",") { "127.0.0.1" }
+    val javaBin = System.getProperty("java.home") + "/bin/java"
+    val classpath = System.getProperty("java.class.path")
+
+    println("=== [MPIRUN] Launching $np local processes on 127.0.0.1 for Lab $targetMode ===")
+
+    val processes = mutableListOf<Process>()
+    for (rank in 0 until np) {
+        val cmd = mutableListOf(
+            javaBin, "-cp", classpath, "sspoirs.MainKt",
+            targetMode, "rank=$rank", "hosts=$hosts"
+        )
+        cmd.addAll(restArgs)
+
+        val pb = ProcessBuilder(cmd)
+        pb.redirectErrorStream(true)
+        val proc = pb.start()
+        processes.add(proc)
+
+        Thread {
+            proc.inputStream.bufferedReader().useLines { lines ->
+                lines.forEach { line -> println("[Proc-$rank] $line") }
+            }
+        }.start()
+    }
+
+    processes.forEach { it.waitFor() }
+    println("=== [MPIRUN] All processes finished. ===")
+}
+
+private fun handleLr7(args: List<String>) {
+    Mpi.init(args)
+    MatrixMult().run(args)
+    Mpi.finalize()
+}
+
+private fun handleLr8(args: List<String>) {
+    Mpi.init(args)
+    MatrixMultGroups().run(args)
+    Mpi.finalize()
+}
+
+private fun generateMatrixFiles(args: List<String>) {
+    val size = args.find { it.startsWith("size=") }?.substringAfter("=")?.toIntOrNull() ?: 600
+    println("Generating $size x $size matrix files (matrixA.bin, matrixB.bin)...")
+
+    fun writeMat(path: String) {
+        val file = RandomAccessFile(path, "rw")
+        val buffer = ByteBuffer.allocate(size * 8)
+        for (i in 0 until size) {
+            buffer.clear()
+            repeat(size) { buffer.putDouble(Math.random()) }
+            file.write(buffer.array())
+        }
+        file.close()
+    }
+
+    writeMat("matrixA.bin")
+    writeMat("matrixB.bin")
+    println("Done.")
+}
+
+private fun handleLr5(args: List<String>) {
+    val submode = args.getOrNull(0)
+    if (submode == null) {
+        println("LR5 Submodes: ping, trace, raw")
+        return
+    }
+
+    try {
+        val icmp = IcmpService()
+        when (submode) {
+            "ping" -> icmp.parallelPing(args.drop(1))
+            "trace" -> icmp.traceroute(args.getOrNull(1) ?: "8.8.8.8")
+            "raw", "smurf" -> {
+                val src = args.getOrNull(1)?.replace("\uFEFF", "")?.trim() ?: return println("Source IP required")
+                val dst = args.getOrNull(2)?.replace("\uFEFF", "")?.trim() ?: return println("Destination IP required")
+                val count = args.getOrNull(3)?.toIntOrNull() ?: 10
+                icmp.sendRawIpPacket(src, dst, count)
+            }
+            else -> println("Unknown submode: $submode")
+        }
+        icmp.close()
+    } catch (e: Exception) {
+        println("[ERROR] ICMP Service: ${e.message}")
+    }
+}
+
+private fun startServer(protocol: Constants.Protocol, port: Int, isThreadPool: Boolean) {
+    try {
+        if (isThreadPool) {
+            TcpThreadPoolServer(port).start()
+        } else {
+            if (protocol == Constants.Protocol.TCP) TcpCommandServer(port).start()
+            else UdpServer(port).start()
+        }
+    } catch (e: Exception) {
+        println("[ERROR] Server failed: ${e.message}")
+    }
+}
+
+private fun startClient(protocol: Constants.Protocol, port: Int, host: String) {
+    try {
+        if (protocol == Constants.Protocol.TCP) {
+            SimpleClient(host, port).start()
+        } else {
+            UdpClient(host, port).start()
+        }
+    } catch (e: Exception) {
+        println("[ERROR] Client failed: ${e.message}")
+    }
+}
+
+private fun handleLr6(args: List<String>) {
+    var params = NetworkDiscovery.discover(args.getOrNull(0))
+
+    if (params == null || params.broadcast == "N/A" || params.broadcast == "0.0.0.0") {
+        println("Auto-discovery failed or found virtual interface.")
+        println("Available interfaces:")
+        val list = NetworkDiscovery.listInterfaces()
+        list.forEachIndexed { idx, p ->
+            println("  $idx: ${p.interfaceName} - IP: ${p.ip}, Broadcast: ${p.broadcast}")
+        }
+        print("Enter interface number (or IP manually): ")
+
+        val input = readLine()?.trim() ?: return
+        val selected = input.toIntOrNull()
+        if (selected != null && selected in list.indices) {
+            params = list[selected]
+        } else {
+            params = NetworkDiscovery.discover(input)
+        }
+
+        if (params == null) {
+            println("Could not determine network parameters. Exiting.")
+            return
+        }
+    }
+
+    println("Network: IP=${params.ip}, Mask=${params.mask}, Broadcast=${params.broadcast} (${params.interfaceName})")
+
+    val chat = P2PChat(params)
+    println("P2P Chat Started. Commands: /mode <b|m>, /list, /ignore <ip>, /leave, /exit")
+
+    while (true) {
+        print("> ")
+        val rawLine = readLine() ?: break
+        val line = rawLine.trim()
+        if (line.isEmpty()) continue
+        if (line.equals("/exit", ignoreCase = true) || line.equals("exit", ignoreCase = true)) break
+
+        if (line.startsWith("/")) {
+            processChatCommand(line, chat)
+        } else {
+            chat.sendMessage(line)
+        }
+    }
+    chat.close()
+}
+
+private fun processChatCommand(line: String, chat: P2PChat) {
+    val parts = line.split(" ")
+    when (parts[0].lowercase()) {
+        "/mode" -> {
+            chat.mode = if (parts.getOrNull(1)?.lowercase() == "m") P2PChat.ChatMode.MULTICAST else P2PChat.ChatMode.BROADCAST
+            println("Mode changed to ${chat.mode}")
+        }
+        "/list" -> {
+            println("Active Peers:")
+            if (chat.peers.isEmpty()) {
+                println("  (No peers discovered yet)")
+            } else {
+                chat.peers.forEach { (id, peer) -> println(" - IP: ${peer.ip}, ID: $id") }
+            }
+        }
+        "/ignore" -> {
+            val target = parts.getOrNull(1)
+            if (target != null) {
+                chat.ignoredPeers.add(target)
+                println("Ignoring messages from $target")
+            } else {
+                println("Usage: /ignore <ip_or_id>")
+            }
+        }
+        "/leave" -> chat.leaveMulticast()
+        else -> println("Unknown command: ${parts[0]}")
+    }
+}
+
+
+
+==================================================
+FILE: Network-File-Server-Lab\src\main\kotlin\sspoirs\common\NetworkUtils.kt
+==================================================
+package sspoirs.common
+
+import java.io.*
+import java.net.*
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+
+object NetworkUtils {
+    
+    private val timeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
+    private val activeTransfers = ConcurrentHashMap<String, String>()
+    private val lock = Any()
+
+    private val statusUpdater = Executors.newSingleThreadScheduledExecutor { r ->
+        Thread(r, "StatusUpdater").apply { isDaemon = true }
+    }.apply {
+        scheduleAtFixedRate({
+            if (activeTransfers.isNotEmpty()) {
+                synchronized(lock) { renderStatusLineInternal() }
+            }
+        }, 500, 500, TimeUnit.MILLISECONDS)
+    }
+
+    fun getTimestamp(): String = LocalDateTime.now().format(timeFormatter)
+
+    fun log(message: String) {
+        synchronized(lock) {
+            print("\r" + " ".repeat(120) + "\r") 
+            println(message)
+            if (activeTransfers.isNotEmpty()) renderStatusLineInternal()
+        }
+    }
+
+    private fun renderStatusLineInternal() {
+        val status = activeTransfers.entries.joinToString(" ") { "[${it.key}: ${it.value}]" }
+        val limitedStatus = if (status.length > 115) status.take(112) + "..." else status
+        print("\r$limitedStatus")
+    }
+
+    fun getLocalIpAddresses(): List<String> {
+        val addresses = mutableListOf<String>()
+        try {
+            val interfaces = NetworkInterface.getNetworkInterfaces()
+            while (interfaces.hasMoreElements()) {
+                val iface = interfaces.nextElement()
+                if (iface.isLoopback || !iface.isUp) continue
+                val iers = iface.inetAddresses
+                while (iers.hasMoreElements()) {
+                    val addr = iers.nextElement()
+                    if (addr is Inet4Address) addresses.add("    ${iface.displayName}: ${addr.hostAddress}")
+                }
+            }
+        } catch (e: Exception) { addresses.add("Error detecting IP: ${e.message}") }
+        return addresses
+    }
+
+    fun readLineBuffered(inputStream: InputStream): String? {
+        val out = ByteArrayOutputStream()
+        var hasData = false
+        try {
+            while (true) {
+                val byte = inputStream.read()
+                if (byte == -1) break
+                hasData = true
+                if (byte == '\n'.code) break
+                if (byte == '\r'.code) continue
+                out.write(byte)
+            }
+        } catch (e: SocketTimeoutException) {
+            throw e 
+        } catch (e: IOException) {
+            return null 
+        }
+        return if (!hasData) null else out.toString("UTF-8")
+    }
+
+    fun writeLine(outputStream: OutputStream, text: String) {
+        outputStream.write((text + Constants.LINE_SEPARATOR).toByteArray())
+        outputStream.flush()
+    }
+
+    fun copyStream(input: InputStream, output: OutputStream, length: Long, socket: Socket? = null, offset: Long = 0L, fullSize: Long = -1L): Long {
+        val buffer = ByteArray(Constants.BUFFER_SIZE)
+        var total: Long = 0
+        val start = System.currentTimeMillis()
+        var lastUpdate = 0L
+        val actualFullSize = if (fullSize > 0) fullSize else length
+        
+        val clientTag = socket?.remoteSocketAddress?.toString()?.split(":")?.lastOrNull() ?: "???"
+        val isServerSide = socket != null && socket.localPort == Constants.DEFAULT_PORT
+
+        try {
+            while (total < length) {
+                val toRead = minOf(buffer.size.toLong(), length - total).toInt()
+                val read = input.read(buffer, 0, toRead)
+                if (read <= 0) break
+                
+                output.write(buffer, 0, read)
+                total += read
+                
+                val now = System.currentTimeMillis()
+                if (now - lastUpdate > 500 || total == length) {
+                    lastUpdate = now
+                    if (actualFullSize > 0) {
+                        val pct = ((offset + total) * 100 / actualFullSize).toInt()
+                        if (isServerSide) {
+                            activeTransfers[clientTag] = "$pct%"
+                        } else {
+                            synchronized(lock) {
+                                print("\r[Progress] $pct% (${offset + total} / $actualFullSize bytes)")
+                            }
+                        }
+                    }
+                }
+            }
+            output.flush()
+        } finally {
+            if (isServerSide) activeTransfers.remove(clientTag)
+        }
+        
+        if (!isServerSide) println()
+        val duration = maxOf(System.currentTimeMillis() - start, 1)
+        val speed = (total / 1024.0) / (duration / 1000.0)
+        log("[Transfer $clientTag] Finished: ${String.format("%.2f", speed)} KB/s")
+        return total
+    }
+}
+
+
+
+==================================================
+FILE: Network-File-Server-Lab\src\main\kotlin\sspoirs\lr5\IcmpPacket.kt
+==================================================
+package sspoirs.lr5
+
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+
+class IcmpPacket(
+    val type: Byte,
+    val code: Byte,
+    val identifier: Short,
+    val sequenceNumber: Short,
+    val data: ByteArray = ByteArray(0)
+) {
+    companion object {
+        const val TYPE_ECHO_REPLY: Byte = 0
+        const val TYPE_DEST_UNREACHABLE: Byte = 3
+        const val TYPE_ECHO_REQUEST: Byte = 8
+        const val TYPE_TIME_EXCEEDED: Byte = 11
+
+        fun createEchoRequest(id: Short, seq: Short, payload: ByteArray): IcmpPacket {
+            return IcmpPacket(TYPE_ECHO_REQUEST, 0, id, seq, payload)
+        }
+
+        fun calculateChecksum(bytes: ByteArray): Short {
+            var sum = 0
+            var i = 0
+            while (i < bytes.size - 1) {
+                val word = ((bytes[i].toInt() and 0xFF) shl 8) or (bytes[i + 1].toInt() and 0xFF)
+                sum += word
+                i += 2
+            }
+            if (i < bytes.size) {
+                sum += (bytes[i].toInt() and 0xFF) shl 8
+            }
+            while ((sum shr 16) != 0) {
+                sum = (sum and 0xFFFF) + (sum shr 16)
+            }
+            return (sum.inv() and 0xFFFF).toShort()
+        }
+
+        fun parse(packetBytes: ByteArray, offset: Int = 0): IcmpPacket {
+            val buffer = ByteBuffer.wrap(packetBytes, offset, packetBytes.size - offset).order(ByteOrder.BIG_ENDIAN)
+            val type = buffer.get()
+            val code = buffer.get()
+            val checksum = buffer.getShort()
+            val id = buffer.getShort()
+            val seq = buffer.getShort()
+            val data = ByteArray(buffer.remaining())
+            buffer.get(data)
+            return IcmpPacket(type, code, id, seq, data)
+        }
+    }
+
+    fun toByteArray(): ByteArray {
+        val size = 8 + data.size
+        val buffer = ByteBuffer.allocate(size).order(ByteOrder.BIG_ENDIAN)
+        buffer.put(type)
+        buffer.put(code)
+        buffer.putShort(0) // Checksum placeholder
+        buffer.putShort(identifier)
+        buffer.putShort(sequenceNumber)
+        buffer.put(data)
+        
+        val bytes = buffer.array()
+        val checksum = calculateChecksum(bytes)
+        
+        // Put checksum back in Big Endian
+        bytes[2] = (checksum.toInt() shr 8).toByte()
+        bytes[3] = (checksum.toInt() and 0xFF).toByte()
+        
+        return bytes
+    }
+}
+
+
+
+==================================================
+FILE: Network-File-Server-Lab\src\main\kotlin\sspoirs\lr5\IcmpService.kt
+==================================================
+package sspoirs.lr5
+
+import com.sun.jna.Memory
+import com.sun.jna.Platform
+import com.sun.jna.ptr.IntByReference
+import sspoirs.common.NetworkUtils
+import java.net.InetAddress
+import java.nio.ByteBuffer
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import kotlin.random.Random
+
+class IcmpService : AutoCloseable {
+    private val net = NativeNet.instance
+    private val socket = net.socket(NativeNet.AF_INET, NativeNet.SOCK_RAW, NativeNet.IPPROTO_ICMP)
+    private val dontWaitFlag = if (Platform.isWindows()) 0 else 0x40
+
+    init {
+        if (socket < 0) {
+            val err = net.getLastError()
+            throw RuntimeException("Failed to create raw socket. Error code: $err. Must run as Admin/Root.")
+        }
+        setSocketTimeout(800)
+    }
+
+    private fun setSocketTimeout(ms: Int) {
+        val tv = if (Platform.isWindows()) {
+            Memory(4).apply { setInt(0, ms) }
+        } else {
+            Memory(16).apply {
+                setLong(0, (ms / 1000).toLong())
+                setLong(8, ((ms % 1000) * 1000).toLong())
+            }
+        }
+        net.setsockopt(socket, net.getSolSocket(), net.getSoRcvTimeo(), tv, tv.size().toInt())
+    }
+
+    override fun close() {
+        net.close(socket)
+    }
+
+    fun parallelPing(hosts: List<String>) {
+        flushSocket()
+        val executor = Executors.newFixedThreadPool(hosts.size)
+        println("Starting parallel ping for ${hosts.size} hosts...")
+
+        hosts.forEach { host ->
+            executor.execute {
+                try {
+                    val result = pingHost(host)
+                    NetworkUtils.log("[PING] $host: $result")
+                } catch (e: Exception) {
+                    NetworkUtils.log("[PING] $host: Error - ${e.message}")
+                }
+            }
+        }
+
+        executor.shutdown()
+        executor.awaitTermination(5, TimeUnit.SECONDS)
+    }
+
+    private fun pingHost(host: String): String {
+        val targetAddr = InetAddress.getByName(host)
+        val id = (Random.nextInt(0, 0xFFFF)).toShort()
+        val sendTime = System.currentTimeMillis()
+        val payload = ByteBuffer.allocate(8).putLong(sendTime).array()
+        val request = IcmpPacket.createEchoRequest(id, 1, payload).toByteArray()
+        
+        val dest = NativeNet.SockAddrIn().apply {
+            sin_family = NativeNet.AF_INET.toShort()
+            sin_addr = targetAddr.address
+        }
+
+        val memReq = Memory(request.size.toLong()).apply { write(0, request, 0, request.size) }
+        net.sendto(socket, memReq, request.size, 0, dest, dest.size())
+
+        val buffer = Memory(65536)
+        val fromAddr = NativeNet.SockAddrIn()
+        val fromLen = IntByReference(fromAddr.size())
+        
+        while (System.currentTimeMillis() - sendTime < 1500) {
+            val bytesRead = net.recvfrom(socket, buffer, buffer.size().toInt(), NativeNet.MSG_PEEK or dontWaitFlag, fromAddr, fromLen)
+            if (bytesRead > 0) {
+                val data = buffer.getByteArray(0, bytesRead)
+                val ipHeaderLen = (data[0].toInt() and 0x0F) * 4
+                if (data.size >= ipHeaderLen + 8) {
+                    val icmp = try { IcmpPacket.parse(data, ipHeaderLen) } catch (e: Exception) { null }
+                    if (icmp != null && icmp.type == IcmpPacket.TYPE_ECHO_REPLY && icmp.identifier == id) {
+                        net.recvfrom(socket, buffer, buffer.size().toInt(), dontWaitFlag, null, IntByReference(0))
+                        val rtt = System.currentTimeMillis() - sendTime
+                        val fromIp = InetAddress.getByAddress(fromAddr.sin_addr).hostAddress
+                        return "Reply from $fromIp: bytes=${icmp.data.size} RTT=${rtt}ms"
+                    }
+                }
+            }
+            Thread.sleep(5)
+        }
+        return "Request timed out"
+    }
+
+    fun traceroute(host: String, maxHops: Int = 30) {
+        flushSocket()
+        val targetAddr = InetAddress.getByName(host)
+        println("Traceroute to $host (${targetAddr.hostAddress}), $maxHops hops max:")
+
+        for (ttl in 1..maxHops) {
+            val result = probeHop(targetAddr, ttl)
+            println("${ttl.toString().padStart(2)}  $result")
+            if (result.contains("Reached")) break
+        }
+    }
+
+    private fun probeHop(target: InetAddress, ttl: Int): String {
+        val ttlPtr = Memory(4).apply { setInt(0, ttl) }
+        net.setsockopt(socket, net.getIpProtoIp(), net.getIpTtl(), ttlPtr, 4)
+        
+        val id = (ttl + 2000).toShort()
+        val startTime = System.currentTimeMillis()
+        val payload = ByteBuffer.allocate(8).putLong(startTime).array()
+        val request = IcmpPacket.createEchoRequest(id, 1, payload).toByteArray()
+        
+        val dest = NativeNet.SockAddrIn().apply {
+            sin_family = NativeNet.AF_INET.toShort()
+            sin_addr = target.address
+        }
+
+        val memReq = Memory(request.size.toLong()).apply { write(0, request, 0, request.size) }
+        net.sendto(socket, memReq, request.size, 0, dest, dest.size())
+        
+        val buffer = Memory(65536)
+        val fromAddr = NativeNet.SockAddrIn()
+        val fromLen = IntByReference(fromAddr.size())
+
+        while (System.currentTimeMillis() - startTime < 1000) {
+            val bytesRead = net.recvfrom(socket, buffer, buffer.size().toInt(), dontWaitFlag, fromAddr, fromLen)
+            if (bytesRead > 0) {
+                val endTime = System.currentTimeMillis()
+                val data = buffer.getByteArray(0, bytesRead)
+                val ipHeaderLen = (data[0].toInt() and 0x0F) * 4
+                val icmp = try { IcmpPacket.parse(data, ipHeaderLen) } catch (e: Exception) { null }
+                
+                if (icmp != null) {
+                    val hopIp = InetAddress.getByAddress(fromAddr.sin_addr).hostAddress
+                    val rtt = endTime - startTime
+                    if (icmp.type == IcmpPacket.TYPE_ECHO_REPLY && icmp.identifier == id) {
+                        return "$hopIp (Reached) - $rtt ms"
+                    }
+                    if (icmp.type == IcmpPacket.TYPE_TIME_EXCEEDED) {
+                        return "$hopIp - $rtt ms"
+                    }
+                }
+            }
+            Thread.sleep(5)
+        }
+        return "* * *"
+    }
+
+    private fun flushSocket() {
+        val buffer = Memory(65536)
+        while (true) {
+            val read = net.recvfrom(socket, buffer, buffer.size().toInt(), 0x40, null, IntByReference(0))
+            if (read <= 0) break
+        }
+    }
+
+    fun sendRawIpPacket(sourceIp: String, destIp: String, count: Int = 10) {
+        val rawSocket = net.socket(NativeNet.AF_INET, NativeNet.SOCK_RAW, NativeNet.IPPROTO_RAW)
+        if (rawSocket < 0) {
+            println("[ERROR] Failed to open IPPROTO_RAW, errno: ${net.getLastError()}")
+            return
+        }
+
+        val one = Memory(4).apply { setInt(0, 1) }
+        net.setsockopt(rawSocket, net.getIpProtoIp(), net.getIpHdrIncl(), one, 4)
+        
+        println("Sending $count raw packets: Source=$sourceIp -> Dest=$destIp")
+        
+        val icmpReq = IcmpPacket.createEchoRequest(0x1337, 1, "PROBE".toByteArray()).toByteArray()
+        val ipHeader = IpHeader(sourceIp, destIp).toByteArray(icmpReq.size)
+        val packet = ipHeader + icmpReq
+        
+        val dest = NativeNet.SockAddrIn().apply {
+            sin_family = NativeNet.AF_INET.toShort()
+            sin_addr = InetAddress.getByName(destIp).address
+        }
+
+        val memPacket = Memory(packet.size.toLong()).apply { write(0, packet, 0, packet.size) }
+
+        repeat(count) {
+            net.sendto(rawSocket, memPacket, packet.size, 0, dest, dest.size())
+            Thread.sleep(50)
+        }
+        
+        net.close(rawSocket)
+        println("Transmission finished.")
+    }
+}
+
+
+==================================================
+FILE: Network-File-Server-Lab\src\main\kotlin\sspoirs\lr5\IpHeader.kt
+==================================================
+package sspoirs.lr5
+
+import java.net.InetAddress
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+
+class IpHeader(
+    val sourceIp: String,
+    val destIp: String,
+    val protocol: Byte = 1, // ICMP = 1
+    val ttl: Byte = 64,
+    val id: Short = 1234
+) {
+    fun toByteArray(payloadSize: Int): ByteArray {
+        val totalLength = 20 + payloadSize
+        val buffer = ByteBuffer.allocate(20).order(ByteOrder.BIG_ENDIAN)
+        
+        // Version (4) | IHL (5 words = 20 bytes)
+        buffer.put(0x45.toByte())
+        // TOS
+        buffer.put(0.toByte())
+        // Total Length
+        buffer.putShort(totalLength.toShort())
+        // ID
+        buffer.putShort(id)
+        // Flags (0) + Fragment Offset (0)
+        buffer.putShort(0)
+        // TTL
+        buffer.put(ttl)
+        // Protocol
+        buffer.put(protocol)
+        // Header Checksum (0 for now)
+        buffer.putShort(0)
+        
+        // Source IP
+        buffer.put(InetAddress.getByName(sourceIp).address)
+        // Destination IP
+        buffer.put(InetAddress.getByName(destIp).address)
+        
+        val headerBytes = buffer.array()
+        val checksum = calculateChecksum(headerBytes)
+        
+        headerBytes[10] = (checksum.toInt() shr 8).toByte()
+        headerBytes[11] = (checksum.toInt() and 0xFF).toByte()
+        
+        return headerBytes
+    }
+
+    private fun calculateChecksum(bytes: ByteArray): Short {
+        var sum = 0
+        var i = 0
+        while (i < bytes.size - 1) {
+            val word = ((bytes[i].toInt() and 0xFF) shl 8) or (bytes[i + 1].toInt() and 0xFF)
+            sum += word
+            i += 2
+        }
+        while ((sum shr 16) != 0) {
+            sum = (sum and 0xFFFF) + (sum shr 16)
+        }
+        return (sum.inv() and 0xFFFF).toShort()
+    }
+}
+
+
+
+==================================================
+FILE: Network-File-Server-Lab\src\main\kotlin\sspoirs\lr5\NativeNet.kt
+==================================================
+package sspoirs.lr5
+
+import com.sun.jna.*
+import com.sun.jna.ptr.IntByReference
+import com.sun.jna.win32.StdCallLibrary
+
+/**
+ * Native interface for socket operations.
+ * Handles Windows (WinSock2) and Linux (LibC) differences.
+ */
+interface NativeNet {
+
+    data class SockAddrIn(
+        @JvmField var sin_family: Short = 2, // AF_INET
+        @JvmField var sin_port: Short = 0,
+        @JvmField var sin_addr: ByteArray = ByteArray(4),
+        @JvmField var sin_zero: ByteArray = ByteArray(8)
+    ) : Structure(), Structure.ByReference {
+        override fun getFieldOrder() = listOf("sin_family", "sin_port", "sin_addr", "sin_zero")
+    }
+
+    fun socket(domain: Int, type: Int, protocol: Int): Int
+    fun sendto(s: Int, buf: Pointer, len: Int, flags: Int, to: Structure, tolen: Int): Int
+    fun recvfrom(s: Int, buf: Pointer, len: Int, flags: Int, from: Structure?, fromlen: IntByReference): Int
+    fun setsockopt(s: Int, level: Int, optname: Int, optval: Pointer, optlen: Int): Int
+    fun close(s: Int): Int
+    fun getLastError(): Int
+    fun getSolSocket(): Int
+    fun getSoRcvTimeo(): Int
+    fun getIpHdrIncl(): Int
+    fun getIpTtl(): Int
+    fun getIpProtoIp(): Int
+
+    companion object {
+        const val AF_INET = 2
+        const val SOCK_RAW = 3
+        const val IPPROTO_IP = 0
+        const val IPPROTO_ICMP = 1
+        const val IPPROTO_RAW = 255
+        const val MSG_PEEK = 0x2
+
+        val instance: NativeNet by lazy {
+            if (Platform.isWindows()) WinNet() else LinuxNet()
+        }
+    }
+}
+
+// Windows Implementation
+interface WinSock2 : StdCallLibrary {
+    fun socket(af: Int, type: Int, protocol: Int): Int
+    fun sendto(s: Int, buf: Pointer, len: Int, flags: Int, to: Structure, tolen: Int): Int
+    fun recvfrom(s: Int, buf: Pointer, len: Int, flags: Int, from: Structure?, fromlen: IntByReference): Int
+    fun setsockopt(s: Int, level: Int, optname: Int, optval: Pointer, optlen: Int): Int
+    fun closesocket(s: Int): Int
+    fun WSAGetLastError(): Int
+    
+    class WSAData : Structure() {
+        @JvmField var wVersion: Short = 0
+        @JvmField var wHighVersion: Short = 0
+        @JvmField var szDescription: ByteArray = ByteArray(257)
+        @JvmField var szSystemStatus: ByteArray = ByteArray(129)
+        @JvmField var iMaxSockets: Short = 0
+        @JvmField var iMaxUdpDg: Short = 0
+        @JvmField var lpVendorInfo: Pointer? = null
+        override fun getFieldOrder() = listOf("wVersion", "wHighVersion", "szDescription", "szSystemStatus", "iMaxSockets", "iMaxUdpDg", "lpVendorInfo")
+    }
+    fun WSAStartup(wVersionRequested: Short, lpWSAData: WSAData): Int
+}
+
+class WinNet : NativeNet {
+    private val lib = Native.load("ws2_32", WinSock2::class.java)
+    
+    init {
+        val wsaData = WinSock2.WSAData()
+        lib.WSAStartup(0x0202.toShort(), wsaData)
+    }
+
+    override fun socket(domain: Int, type: Int, protocol: Int) = lib.socket(domain, type, protocol)
+    override fun sendto(s: Int, buf: Pointer, len: Int, flags: Int, to: Structure, tolen: Int) = lib.sendto(s, buf, len, flags, to, tolen)
+    override fun recvfrom(s: Int, buf: Pointer, len: Int, flags: Int, from: Structure?, fromlen: IntByReference) = lib.recvfrom(s, buf, len, flags, from, fromlen)
+    override fun setsockopt(s: Int, level: Int, optname: Int, optval: Pointer, optlen: Int) = lib.setsockopt(s, level, optname, optval, optlen)
+    override fun close(s: Int) = lib.closesocket(s)
+    override fun getLastError() = lib.WSAGetLastError()
+    override fun getSolSocket() = SOL_SOCKET
+    override fun getSoRcvTimeo() = SO_RCVTIMEO
+    override fun getIpHdrIncl() = IP_HDRINCL
+    override fun getIpTtl() = IP_TTL
+    override fun getIpProtoIp() = IPPROTO_IP
+    
+    companion object {
+        const val IPPROTO_IP = 0
+        const val SOL_SOCKET = 0xffff
+        const val SO_RCVTIMEO = 0x1006
+        const val IP_HDRINCL = 2
+        const val IP_TTL = 4
+    }
+}
+
+// Linux Implementation
+interface LibC : Library {
+    fun socket(domain: Int, type: Int, protocol: Int): Int
+    fun sendto(s: Int, buf: Pointer, len: Int, flags: Int, to: Structure, tolen: Int): Int
+    fun recvfrom(s: Int, buf: Pointer, len: Int, flags: Int, from: Structure?, fromlen: IntByReference): Int
+    fun setsockopt(s: Int, level: Int, optname: Int, optval: Pointer, optlen: Int): Int
+    fun close(fd: Int): Int
+    fun __errno_location(): Pointer
+}
+
+class LinuxNet : NativeNet {
+    private val lib = Native.load("c", LibC::class.java)
+
+    override fun socket(domain: Int, type: Int, protocol: Int) = lib.socket(domain, type, protocol)
+    override fun sendto(s: Int, buf: Pointer, len: Int, flags: Int, to: Structure, tolen: Int) = lib.sendto(s, buf, len, flags, to, tolen)
+    override fun recvfrom(s: Int, buf: Pointer, len: Int, flags: Int, from: Structure?, fromlen: IntByReference) = lib.recvfrom(s, buf, len, flags, from, fromlen)
+    override fun setsockopt(s: Int, level: Int, optname: Int, optval: Pointer, optlen: Int) = lib.setsockopt(s, level, optname, optval, optlen)
+    override fun close(s: Int) = lib.close(s)
+    override fun getLastError() = lib.__errno_location().getInt(0)
+    override fun getSolSocket() = SOL_SOCKET
+    override fun getSoRcvTimeo() = SO_RCVTIMEO
+    override fun getIpHdrIncl() = IP_HDRINCL
+    override fun getIpTtl() = IP_TTL
+    override fun getIpProtoIp() = IPPROTO_IP
+
+    companion object {
+        const val IPPROTO_IP = 0
+        const val SOL_SOCKET = 1
+        const val SO_RCVTIMEO = 20
+        const val IP_HDRINCL = 3
+        const val IP_TTL = 2
+    }
+}
+
+

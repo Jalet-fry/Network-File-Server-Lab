@@ -1,0 +1,1777 @@
+﻿==================================================
+FILE: Network-File-Server-Lab\src\main\kotlin\sspoirs\lr6\P2PChat.kt
+==================================================
+package sspoirs.lr6
+
+import java.net.*
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArraySet
+import kotlin.concurrent.thread
+
+class P2PChat(val params: NetworkDiscovery.NetParams) {
+    private val port = 9999
+    private val multicastGroup = "239.0.0.1"
+    val instanceId: String = UUID.randomUUID().toString().take(6)
+
+    private val socket: MulticastSocket
+    private val groupAddr = InetAddress.getByName(multicastGroup)
+    private val boundInterface: NetworkInterface? = NetworkInterface.getByName(params.interfaceName)
+
+    val peers = ConcurrentHashMap<String, PeerInfo>()
+    val ignoredPeers = CopyOnWriteArraySet<String>()
+
+    private var isRunning = true
+    private var inMulticastGroup = true
+    var mode = ChatMode.BROADCAST
+
+    enum class ChatMode { BROADCAST, MULTICAST }
+
+    init {
+        socket = MulticastSocket(port).apply {
+            reuseAddress = true
+            broadcast = true
+            try {
+                setLoopbackMode(false)
+            } catch (e: Exception) {}
+            soTimeout = 1000
+        }
+
+        try {
+            if (boundInterface != null) {
+                socket.networkInterface = boundInterface
+            }
+            socket.joinGroup(groupAddr)
+            println("[$instanceId] Joined Multicast Group $multicastGroup on ${params.interfaceName}")
+        } catch (e: Exception) {
+            println("[$instanceId] Multicast join fallback: ${e.message}")
+        }
+
+        startReceiver()
+        startDiscoveryBeacon()
+    }
+
+    private fun startReceiver() {
+        thread(isDaemon = true, name = "ChatReceiver") {
+            val buffer = ByteArray(2048)
+            while (isRunning) {
+                try {
+                    val packet = DatagramPacket(buffer, buffer.size)
+                    socket.receive(packet)
+                    handleIncoming(packet)
+                } catch (e: SocketTimeoutException) {
+                    // Таймаут для проверки флага isRunning
+                } catch (e: Exception) {
+                    if (isRunning) println("Receive error: ${e.message}")
+                }
+            }
+        }
+    }
+
+    private fun handleIncoming(packet: DatagramPacket) {
+        val raw = String(packet.data, 0, packet.length, Charsets.UTF_8)
+        val parts = raw.split("|", limit = 4)
+        if (parts.size < 3) return
+
+        val senderId = parts[0]
+        val packetMode = parts[1] // BCAST или MCAST
+        val type = parts[2]
+        val payload = if (parts.size > 3) parts[3] else ""
+
+        // Игнорируем свои собственные пакеты
+        if (senderId == instanceId) return
+
+        val senderIp = packet.address.hostAddress
+
+        // Если мы вышли из Multicast (/leave), не принимаем Multicast-сообщения!
+        if (packetMode == "MCAST" && !inMulticastGroup) {
+            return
+        }
+
+        when (type) {
+            "HELLO" -> {
+                peers.getOrPut(senderId) { PeerInfo(senderIp) }.lastSeen = System.currentTimeMillis()
+            }
+            "MSG" -> {
+                if (ignoredPeers.contains(senderId) || ignoredPeers.contains(senderIp)) return
+                val modeLabel = if (packetMode == "MCAST") "[MULTICAST (239.0.0.1)]" else "[BROADCAST]"
+                println("\n$modeLabel from $senderIp ($senderId): $payload")
+                print("> ")
+                System.out.flush()
+            }
+            "EXIT" -> {
+                peers.remove(senderId)
+                println("\n[SYSTEM INFO] Peer $senderId ($senderIp) disconnected (/exit).")
+                print("> ")
+                System.out.flush()
+            }
+        }
+    }
+
+    private fun startDiscoveryBeacon() {
+        thread(isDaemon = true, name = "DiscoveryBeacon") {
+            while (isRunning) {
+                sendPacket("HELLO", "")
+                cleanOldPeers()
+                Thread.sleep(3000)
+            }
+        }
+    }
+
+    private fun cleanOldPeers() {
+        val now = System.currentTimeMillis()
+        peers.values.removeIf { now - it.lastSeen > 10000 }
+    }
+
+    fun sendMessage(text: String) {
+        sendPacket("MSG", text)
+        val modeLabel = if (mode == ChatMode.MULTICAST) "[MULTICAST]" else "[BROADCAST]"
+        println("[You $modeLabel]: $text")
+    }
+
+    private fun sendPacket(type: String, payload: String) {
+        try {
+            val modeStr = if (mode == ChatMode.MULTICAST) "MCAST" else "BCAST"
+            val data = "$instanceId|$modeStr|$type|$payload".toByteArray(Charsets.UTF_8)
+            val targetHost = if (mode == ChatMode.BROADCAST) params.broadcast else multicastGroup
+            val addr = InetAddress.getByName(targetHost)
+            val packet = DatagramPacket(data, data.size, addr, port)
+
+            if (boundInterface != null) {
+                socket.networkInterface = boundInterface
+            }
+            socket.send(packet)
+
+            if (params.ip == "127.0.0.1") {
+                val loopbackAddr = InetAddress.getByName("127.0.0.1")
+                socket.send(DatagramPacket(data, data.size, loopbackAddr, port))
+            }
+        } catch (e: Exception) {
+            // ignore
+        }
+    }
+
+    fun leaveMulticast() {
+        try {
+            inMulticastGroup = false
+            socket.leaveGroup(groupAddr)
+            println("Successfully left Multicast group $multicastGroup. You will no longer receive multicast messages.")
+        } catch (e: Exception) {
+            println("Error leaving group: ${e.message}")
+        }
+    }
+
+    fun close() {
+        isRunning = false
+        // Принудительно отсылаем EXIT в Broadcast, чтобы все гарантированно увидели отключение
+        val prevMode = mode
+        mode = ChatMode.BROADCAST
+        sendPacket("EXIT", "")
+        mode = prevMode
+        try { socket.close() } catch (e: Exception) {}
+    }
+}
+
+
+==================================================
+FILE: Network-File-Server-Lab\src\main\kotlin\sspoirs\lr6\NetworkDiscovery.kt
+==================================================
+package sspoirs.lr6
+
+import java.net.Inet4Address
+import java.net.NetworkInterface
+import java.util.*
+
+object NetworkDiscovery {
+
+    data class NetParams(
+        val ip: String,
+        val mask: String,
+        val broadcast: String,
+        val interfaceName: String
+    )
+
+    /**
+     * Автоопределение с возможностью ручного выбора интерфейса
+     */
+    fun discover(manualIp: String? = null): NetParams? {
+        // Если указан IP вручную, ищем интерфейс с этим IP
+        if (manualIp != null) {
+            return discoverByIp(manualIp)
+        }
+        
+        // Автоопределение с фильтрацией виртуальных адаптеров
+        val interfaces = NetworkInterface.getNetworkInterfaces()
+        val candidates = mutableListOf<NetParams>()
+        
+        while (interfaces.hasMoreElements()) {
+            val iface = interfaces.nextElement()
+            
+            // Пропускаем loopback и неактивные
+            if (iface.isLoopback || !iface.isUp) continue
+            
+            // Фильтруем виртуальные адаптеры Windows
+            val name = iface.displayName.lowercase(Locale.getDefault())
+            if (isVirtualInterface(name, iface)) continue
+            
+            val params = extractParams(iface)
+            if (params != null) {
+                // Приоритет у адаптеров с реальными broadcast адресами
+                if (params.broadcast != "N/A" && params.broadcast != "0.0.0.0") {
+                    return params // Сразу возвращаем хороший вариант
+                }
+                candidates.add(params)
+            }
+        }
+        
+        // Если хороших нет, берем любой
+        return candidates.firstOrNull()
+    }
+
+    private fun discoverByIp(ip: String): NetParams? {
+        val interfaces = NetworkInterface.getNetworkInterfaces()
+        while (interfaces.hasMoreElements()) {
+            val iface = interfaces.nextElement()
+            if (iface.isLoopback || !iface.isUp) continue
+            
+            for (addr in iface.interfaceAddresses) {
+                val address = addr.address
+                if (address is Inet4Address && address.hostAddress == ip) {
+                    return NetParams(
+                        ip = ip,
+                        mask = prefixToMask(addr.networkPrefixLength),
+                        broadcast = addr.broadcast?.hostAddress ?: calculateBroadcast(ip, addr.networkPrefixLength),
+                        interfaceName = iface.name
+                    )
+                }
+            }
+        }
+        return null
+    }
+
+    private fun isVirtualInterface(name: String, iface: NetworkInterface): Boolean {
+        // Проверяем по имени
+        val virtualKeywords = listOf(
+            "virtual", "vmware", "virtualbox", "vbox", 
+            "hyper-v", "hyperv", "wsl", "docker",
+            "ethernet adapter v", "bluetooth", "adapter for loopback"
+        )
+        
+        if (virtualKeywords.any { name.contains(it) }) return true
+        
+        // Проверка по hardware address (MAC)
+        try {
+            val hw = iface.hardwareAddress
+            if (hw != null && hw.isNotEmpty()) {
+                // VMware: 00:50:56, 00:0C:29
+                // VirtualBox: 08:00:27
+                // Hyper-V: 00:15:5D
+                val prefix = hw.take(3).joinToString("") { "%02X".format(it.toInt()) }
+                val virtualMacs = listOf("005056", "000C29", "080027", "00155D")
+                if (virtualMacs.any { prefix.startsWith(it) }) return true
+            }
+        } catch (e: Exception) { /* ignore */ }
+        
+        return false
+    }
+
+    private fun extractParams(iface: NetworkInterface): NetParams? {
+        for (addr in iface.interfaceAddresses) {
+            val ip = addr.address
+            if (ip is Inet4Address && !ip.isLoopbackAddress) {
+                // Проверяем, что IP не из диапазона виртуальных адаптеров
+                val ipStr = ip.hostAddress
+                if (ipStr.startsWith("169.254.")) continue // APIPA
+                if (ipStr.startsWith("127.")) continue // Loopback
+                
+                return NetParams(
+                    ip = ipStr,
+                    mask = prefixToMask(addr.networkPrefixLength),
+                    broadcast = addr.broadcast?.hostAddress 
+                        ?: calculateBroadcast(ipStr, addr.networkPrefixLength),
+                    interfaceName = iface.name
+                )
+            }
+        }
+        return null
+    }
+
+    private fun calculateBroadcast(ip: String, prefix: Short): String {
+        try {
+            val parts = ip.split(".").map { it.toInt() }
+            val mask = -1 shl (32 - prefix.toInt())
+            val ipInt = (parts[0] shl 24) or (parts[1] shl 16) or (parts[2] shl 8) or parts[3]
+            val broadcast = ipInt or mask.inv()
+            return "${(broadcast shr 24) and 0xFF}.${(broadcast shr 16) and 0xFF}.${(broadcast shr 8) and 0xFF}.${broadcast and 0xFF}"
+        } catch (e: Exception) {
+            return "255.255.255.255"
+        }
+    }
+
+    private fun prefixToMask(prefix: Short): String {
+        val mask = -1 shl (32 - prefix.toInt())
+        return listOf(
+            (mask shr 24) and 0xFF,
+            (mask shr 16) and 0xFF,
+            (mask shr 8) and 0xFF,
+            mask and 0xFF
+        ).joinToString(".")
+    }
+
+    /**
+     * Вывод всех доступных интерфейсов для ручного выбора
+     */
+    fun listInterfaces(): List<NetParams> {
+        val result = mutableListOf<NetParams>()
+        val interfaces = NetworkInterface.getNetworkInterfaces()
+        while (interfaces.hasMoreElements()) {
+            val iface = interfaces.nextElement()
+            if (iface.isLoopback || !iface.isUp) continue
+            val params = extractParams(iface)
+            if (params != null) result.add(params)
+        }
+        return result
+    }
+}
+
+
+
+==================================================
+FILE: Network-File-Server-Lab\src\main\kotlin\sspoirs\lr6\PeerInfo.kt
+==================================================
+package sspoirs.lr6
+
+/**
+ * Information about a discovered peer in the network.
+ */
+data class PeerInfo(
+    val ip: String,
+    var lastSeen: Long = System.currentTimeMillis()
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is PeerInfo) return false
+        return ip == other.ip
+    }
+
+    override fun hashCode(): Int = ip.hashCode()
+}
+
+
+
+==================================================
+FILE: Network-File-Server-Lab\src\main\kotlin\sspoirs\lr5\IcmpService.kt
+==================================================
+package sspoirs.lr5
+
+import com.sun.jna.Memory
+import com.sun.jna.Platform
+import com.sun.jna.ptr.IntByReference
+import sspoirs.common.NetworkUtils
+import java.net.InetAddress
+import java.nio.ByteBuffer
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import kotlin.random.Random
+
+class IcmpService : AutoCloseable {
+    private val net = NativeNet.instance
+    private val socket = net.socket(NativeNet.AF_INET, NativeNet.SOCK_RAW, NativeNet.IPPROTO_ICMP)
+    private val dontWaitFlag = if (Platform.isWindows()) 0 else 0x40
+
+    init {
+        if (socket < 0) {
+            val err = net.getLastError()
+            throw RuntimeException("Failed to create raw socket. Error code: $err. Must run as Admin/Root.")
+        }
+        setSocketTimeout(800)
+    }
+
+    private fun setSocketTimeout(ms: Int) {
+        val tv = if (Platform.isWindows()) {
+            Memory(4).apply { setInt(0, ms) }
+        } else {
+            Memory(16).apply {
+                setLong(0, (ms / 1000).toLong())
+                setLong(8, ((ms % 1000) * 1000).toLong())
+            }
+        }
+        net.setsockopt(socket, net.getSolSocket(), net.getSoRcvTimeo(), tv, tv.size().toInt())
+    }
+
+    override fun close() {
+        net.close(socket)
+    }
+
+    fun parallelPing(hosts: List<String>) {
+        flushSocket()
+        val executor = Executors.newFixedThreadPool(hosts.size)
+        println("Starting parallel ping for ${hosts.size} hosts...")
+
+        hosts.forEach { host ->
+            executor.execute {
+                try {
+                    val result = pingHost(host)
+                    NetworkUtils.log("[PING] $host: $result")
+                } catch (e: Exception) {
+                    NetworkUtils.log("[PING] $host: Error - ${e.message}")
+                }
+            }
+        }
+
+        executor.shutdown()
+        executor.awaitTermination(5, TimeUnit.SECONDS)
+    }
+
+    private fun pingHost(host: String): String {
+        val targetAddr = InetAddress.getByName(host)
+        val id = (Random.nextInt(0, 0xFFFF)).toShort()
+        val sendTime = System.currentTimeMillis()
+        val payload = ByteBuffer.allocate(8).putLong(sendTime).array()
+        val request = IcmpPacket.createEchoRequest(id, 1, payload).toByteArray()
+        
+        val dest = NativeNet.SockAddrIn().apply {
+            sin_family = NativeNet.AF_INET.toShort()
+            sin_addr = targetAddr.address
+        }
+
+        val memReq = Memory(request.size.toLong()).apply { write(0, request, 0, request.size) }
+        net.sendto(socket, memReq, request.size, 0, dest, dest.size())
+
+        val buffer = Memory(65536)
+        val fromAddr = NativeNet.SockAddrIn()
+        val fromLen = IntByReference(fromAddr.size())
+        
+        while (System.currentTimeMillis() - sendTime < 1500) {
+            val bytesRead = net.recvfrom(socket, buffer, buffer.size().toInt(), NativeNet.MSG_PEEK or dontWaitFlag, fromAddr, fromLen)
+            if (bytesRead > 0) {
+                val data = buffer.getByteArray(0, bytesRead)
+                val ipHeaderLen = (data[0].toInt() and 0x0F) * 4
+                if (data.size >= ipHeaderLen + 8) {
+                    val icmp = try { IcmpPacket.parse(data, ipHeaderLen) } catch (e: Exception) { null }
+                    if (icmp != null && icmp.type == IcmpPacket.TYPE_ECHO_REPLY && icmp.identifier == id) {
+                        net.recvfrom(socket, buffer, buffer.size().toInt(), dontWaitFlag, null, IntByReference(0))
+                        val rtt = System.currentTimeMillis() - sendTime
+                        val fromIp = InetAddress.getByAddress(fromAddr.sin_addr).hostAddress
+                        return "Reply from $fromIp: bytes=${icmp.data.size} RTT=${rtt}ms"
+                    }
+                }
+            }
+            Thread.sleep(5)
+        }
+        return "Request timed out"
+    }
+
+    fun traceroute(host: String, maxHops: Int = 30) {
+        flushSocket()
+        val targetAddr = InetAddress.getByName(host)
+        println("Traceroute to $host (${targetAddr.hostAddress}), $maxHops hops max:")
+
+        for (ttl in 1..maxHops) {
+            val result = probeHop(targetAddr, ttl)
+            println("${ttl.toString().padStart(2)}  $result")
+            if (result.contains("Reached")) break
+        }
+    }
+
+    private fun probeHop(target: InetAddress, ttl: Int): String {
+        val ttlPtr = Memory(4).apply { setInt(0, ttl) }
+        net.setsockopt(socket, net.getIpProtoIp(), net.getIpTtl(), ttlPtr, 4)
+        
+        val id = (ttl + 2000).toShort()
+        val startTime = System.currentTimeMillis()
+        val payload = ByteBuffer.allocate(8).putLong(startTime).array()
+        val request = IcmpPacket.createEchoRequest(id, 1, payload).toByteArray()
+        
+        val dest = NativeNet.SockAddrIn().apply {
+            sin_family = NativeNet.AF_INET.toShort()
+            sin_addr = target.address
+        }
+
+        val memReq = Memory(request.size.toLong()).apply { write(0, request, 0, request.size) }
+        net.sendto(socket, memReq, request.size, 0, dest, dest.size())
+        
+        val buffer = Memory(65536)
+        val fromAddr = NativeNet.SockAddrIn()
+        val fromLen = IntByReference(fromAddr.size())
+
+        while (System.currentTimeMillis() - startTime < 1000) {
+            val bytesRead = net.recvfrom(socket, buffer, buffer.size().toInt(), dontWaitFlag, fromAddr, fromLen)
+            if (bytesRead > 0) {
+                val endTime = System.currentTimeMillis()
+                val data = buffer.getByteArray(0, bytesRead)
+                val ipHeaderLen = (data[0].toInt() and 0x0F) * 4
+                val icmp = try { IcmpPacket.parse(data, ipHeaderLen) } catch (e: Exception) { null }
+                
+                if (icmp != null) {
+                    val hopIp = InetAddress.getByAddress(fromAddr.sin_addr).hostAddress
+                    val rtt = endTime - startTime
+                    if (icmp.type == IcmpPacket.TYPE_ECHO_REPLY && icmp.identifier == id) {
+                        return "$hopIp (Reached) - $rtt ms"
+                    }
+                    if (icmp.type == IcmpPacket.TYPE_TIME_EXCEEDED) {
+                        return "$hopIp - $rtt ms"
+                    }
+                }
+            }
+            Thread.sleep(5)
+        }
+        return "* * *"
+    }
+
+    private fun flushSocket() {
+        val buffer = Memory(65536)
+        while (true) {
+            val read = net.recvfrom(socket, buffer, buffer.size().toInt(), 0x40, null, IntByReference(0))
+            if (read <= 0) break
+        }
+    }
+
+    fun sendRawIpPacket(sourceIp: String, destIp: String, count: Int = 10) {
+        val rawSocket = net.socket(NativeNet.AF_INET, NativeNet.SOCK_RAW, NativeNet.IPPROTO_RAW)
+        if (rawSocket < 0) {
+            println("[ERROR] Failed to open IPPROTO_RAW, errno: ${net.getLastError()}")
+            return
+        }
+
+        val one = Memory(4).apply { setInt(0, 1) }
+        net.setsockopt(rawSocket, net.getIpProtoIp(), net.getIpHdrIncl(), one, 4)
+        
+        println("Sending $count raw packets: Source=$sourceIp -> Dest=$destIp")
+        
+        val icmpReq = IcmpPacket.createEchoRequest(0x1337, 1, "PROBE".toByteArray()).toByteArray()
+        val ipHeader = IpHeader(sourceIp, destIp).toByteArray(icmpReq.size)
+        val packet = ipHeader + icmpReq
+        
+        val dest = NativeNet.SockAddrIn().apply {
+            sin_family = NativeNet.AF_INET.toShort()
+            sin_addr = InetAddress.getByName(destIp).address
+        }
+
+        val memPacket = Memory(packet.size.toLong()).apply { write(0, packet, 0, packet.size) }
+
+        repeat(count) {
+            net.sendto(rawSocket, memPacket, packet.size, 0, dest, dest.size())
+            Thread.sleep(50)
+        }
+        
+        net.close(rawSocket)
+        println("Transmission finished.")
+    }
+}
+
+
+==================================================
+FILE: Network-File-Server-Lab\src\main\kotlin\sspoirs\lr5\NativeNet.kt
+==================================================
+package sspoirs.lr5
+
+import com.sun.jna.*
+import com.sun.jna.ptr.IntByReference
+import com.sun.jna.win32.StdCallLibrary
+
+/**
+ * Native interface for socket operations.
+ * Handles Windows (WinSock2) and Linux (LibC) differences.
+ */
+interface NativeNet {
+
+    data class SockAddrIn(
+        @JvmField var sin_family: Short = 2, // AF_INET
+        @JvmField var sin_port: Short = 0,
+        @JvmField var sin_addr: ByteArray = ByteArray(4),
+        @JvmField var sin_zero: ByteArray = ByteArray(8)
+    ) : Structure(), Structure.ByReference {
+        override fun getFieldOrder() = listOf("sin_family", "sin_port", "sin_addr", "sin_zero")
+    }
+
+    fun socket(domain: Int, type: Int, protocol: Int): Int
+    fun sendto(s: Int, buf: Pointer, len: Int, flags: Int, to: Structure, tolen: Int): Int
+    fun recvfrom(s: Int, buf: Pointer, len: Int, flags: Int, from: Structure?, fromlen: IntByReference): Int
+    fun setsockopt(s: Int, level: Int, optname: Int, optval: Pointer, optlen: Int): Int
+    fun close(s: Int): Int
+    fun getLastError(): Int
+    fun getSolSocket(): Int
+    fun getSoRcvTimeo(): Int
+    fun getIpHdrIncl(): Int
+    fun getIpTtl(): Int
+    fun getIpProtoIp(): Int
+
+    companion object {
+        const val AF_INET = 2
+        const val SOCK_RAW = 3
+        const val IPPROTO_IP = 0
+        const val IPPROTO_ICMP = 1
+        const val IPPROTO_RAW = 255
+        const val MSG_PEEK = 0x2
+
+        val instance: NativeNet by lazy {
+            if (Platform.isWindows()) WinNet() else LinuxNet()
+        }
+    }
+}
+
+// Windows Implementation
+interface WinSock2 : StdCallLibrary {
+    fun socket(af: Int, type: Int, protocol: Int): Int
+    fun sendto(s: Int, buf: Pointer, len: Int, flags: Int, to: Structure, tolen: Int): Int
+    fun recvfrom(s: Int, buf: Pointer, len: Int, flags: Int, from: Structure?, fromlen: IntByReference): Int
+    fun setsockopt(s: Int, level: Int, optname: Int, optval: Pointer, optlen: Int): Int
+    fun closesocket(s: Int): Int
+    fun WSAGetLastError(): Int
+    
+    class WSAData : Structure() {
+        @JvmField var wVersion: Short = 0
+        @JvmField var wHighVersion: Short = 0
+        @JvmField var szDescription: ByteArray = ByteArray(257)
+        @JvmField var szSystemStatus: ByteArray = ByteArray(129)
+        @JvmField var iMaxSockets: Short = 0
+        @JvmField var iMaxUdpDg: Short = 0
+        @JvmField var lpVendorInfo: Pointer? = null
+        override fun getFieldOrder() = listOf("wVersion", "wHighVersion", "szDescription", "szSystemStatus", "iMaxSockets", "iMaxUdpDg", "lpVendorInfo")
+    }
+    fun WSAStartup(wVersionRequested: Short, lpWSAData: WSAData): Int
+}
+
+class WinNet : NativeNet {
+    private val lib = Native.load("ws2_32", WinSock2::class.java)
+    
+    init {
+        val wsaData = WinSock2.WSAData()
+        lib.WSAStartup(0x0202.toShort(), wsaData)
+    }
+
+    override fun socket(domain: Int, type: Int, protocol: Int) = lib.socket(domain, type, protocol)
+    override fun sendto(s: Int, buf: Pointer, len: Int, flags: Int, to: Structure, tolen: Int) = lib.sendto(s, buf, len, flags, to, tolen)
+    override fun recvfrom(s: Int, buf: Pointer, len: Int, flags: Int, from: Structure?, fromlen: IntByReference) = lib.recvfrom(s, buf, len, flags, from, fromlen)
+    override fun setsockopt(s: Int, level: Int, optname: Int, optval: Pointer, optlen: Int) = lib.setsockopt(s, level, optname, optval, optlen)
+    override fun close(s: Int) = lib.closesocket(s)
+    override fun getLastError() = lib.WSAGetLastError()
+    override fun getSolSocket() = SOL_SOCKET
+    override fun getSoRcvTimeo() = SO_RCVTIMEO
+    override fun getIpHdrIncl() = IP_HDRINCL
+    override fun getIpTtl() = IP_TTL
+    override fun getIpProtoIp() = IPPROTO_IP
+    
+    companion object {
+        const val IPPROTO_IP = 0
+        const val SOL_SOCKET = 0xffff
+        const val SO_RCVTIMEO = 0x1006
+        const val IP_HDRINCL = 2
+        const val IP_TTL = 4
+    }
+}
+
+// Linux Implementation
+interface LibC : Library {
+    fun socket(domain: Int, type: Int, protocol: Int): Int
+    fun sendto(s: Int, buf: Pointer, len: Int, flags: Int, to: Structure, tolen: Int): Int
+    fun recvfrom(s: Int, buf: Pointer, len: Int, flags: Int, from: Structure?, fromlen: IntByReference): Int
+    fun setsockopt(s: Int, level: Int, optname: Int, optval: Pointer, optlen: Int): Int
+    fun close(fd: Int): Int
+    fun __errno_location(): Pointer
+}
+
+class LinuxNet : NativeNet {
+    private val lib = Native.load("c", LibC::class.java)
+
+    override fun socket(domain: Int, type: Int, protocol: Int) = lib.socket(domain, type, protocol)
+    override fun sendto(s: Int, buf: Pointer, len: Int, flags: Int, to: Structure, tolen: Int) = lib.sendto(s, buf, len, flags, to, tolen)
+    override fun recvfrom(s: Int, buf: Pointer, len: Int, flags: Int, from: Structure?, fromlen: IntByReference) = lib.recvfrom(s, buf, len, flags, from, fromlen)
+    override fun setsockopt(s: Int, level: Int, optname: Int, optval: Pointer, optlen: Int) = lib.setsockopt(s, level, optname, optval, optlen)
+    override fun close(s: Int) = lib.close(s)
+    override fun getLastError() = lib.__errno_location().getInt(0)
+    override fun getSolSocket() = SOL_SOCKET
+    override fun getSoRcvTimeo() = SO_RCVTIMEO
+    override fun getIpHdrIncl() = IP_HDRINCL
+    override fun getIpTtl() = IP_TTL
+    override fun getIpProtoIp() = IPPROTO_IP
+
+    companion object {
+        const val IPPROTO_IP = 0
+        const val SOL_SOCKET = 1
+        const val SO_RCVTIMEO = 20
+        const val IP_HDRINCL = 3
+        const val IP_TTL = 2
+    }
+}
+
+
+==================================================
+FILE: Network-File-Server-Lab\src\main\kotlin\sspoirs\lr7\MatrixMult.kt
+==================================================
+package sspoirs.lr7
+
+import sspoirs.mpi.Mpi
+import sspoirs.mpi.MpiRequest
+import java.io.Serializable
+
+class MatrixMult {
+
+    fun run(args: List<String>) {
+        val size = args.find { it.startsWith("size=") }?.substringAfter("=")?.toIntOrNull() ?: 600
+        val mode = args.find { it.startsWith("mode=") }?.substringAfter("=") ?: "blocking"
+        val comm = Mpi.COMM_WORLD
+
+        if (comm.rank == 0) {
+            master(size, mode)
+        } else {
+            slave()
+        }
+    }
+
+    private fun master(size: Int, mode: String) {
+        val comm = Mpi.COMM_WORLD
+        println("\n[LR7 Master] Generating $size x $size matrices...")
+        val a = Array(size) { DoubleArray(size) { (1..9).random().toDouble() } }
+        val b = Array(size) { DoubleArray(size) { (1..9).random().toDouble() } }
+        val c = Array(size) { DoubleArray(size) }
+
+        // Рассылка матрицы B всем подчиненным процессам
+        for (i in 1 until comm.size) {
+            comm.send(i, TAG_B, b)
+        }
+
+        println("[LR7 Master] Computing in '$mode' mode across ${comm.size} processes...")
+        val startTime = System.currentTimeMillis()
+
+        if (comm.size == 1) {
+            multiplySingleNode(a, b, c, 0, size)
+        } else if (mode.lowercase() == "blocking") {
+            runBlocking(a, c, size)
+        } else {
+            runNonBlocking(a, c, size)
+        }
+
+        val duration = System.currentTimeMillis() - startTime
+        println("[LR7 Master] Execution finished in: ${duration}ms (${duration / 1000.0}s)")
+
+        verifyResult(a, b, c, size)
+
+        // Остановка рабочих процессов
+        for (i in 1 until comm.size) {
+            comm.send(i, TAG_EXIT, "")
+        }
+    }
+
+    private fun runBlocking(a: Array<DoubleArray>, c: Array<DoubleArray>, size: Int) {
+        val comm = Mpi.COMM_WORLD
+        val numWorkers = comm.size - 1
+        val (starts, counts) = calculateBlockRanges(size, numWorkers)
+
+        for (w in 0 until numWorkers) {
+            val workerRank = w + 1
+            val chunk = Array(counts[w]) { a[starts[w] + it] }
+            comm.send(workerRank, TAG_CHUNK_DATA, ChunkData(starts[w], chunk))
+
+            val res = comm.recv(workerRank, TAG_RESULT) as ChunkResult
+            copyChunkToResult(c, res)
+        }
+    }
+
+    private fun runNonBlocking(a: Array<DoubleArray>, c: Array<DoubleArray>, size: Int) {
+        val comm = Mpi.COMM_WORLD
+        val numWorkers = comm.size - 1
+        val (starts, counts) = calculateBlockRanges(size, numWorkers)
+        val requests = mutableListOf<MpiRequest>()
+
+        // Асинхронная отправка всех блоков воркерам
+        for (w in 0 until numWorkers) {
+            val workerRank = w + 1
+            val chunk = Array(counts[w]) { a[starts[w] + it] }
+            comm.isend(workerRank, TAG_CHUNK_DATA, ChunkData(starts[w], chunk))
+            requests.add(comm.irecv(workerRank, TAG_RESULT))
+        }
+
+        // Асинхронный сбор ответов
+        for (req in requests) {
+            val res = req.wait() as ChunkResult
+            copyChunkToResult(c, res)
+        }
+    }
+
+    private fun slave() {
+        val comm = Mpi.COMM_WORLD
+        var b: Array<DoubleArray>? = null
+
+        while (true) {
+            val msg = comm.recvMessage(source = 0)
+            when (msg.tag) {
+                TAG_B -> b = msg.data as Array<DoubleArray>
+                TAG_CHUNK_DATA -> {
+                    val data = msg.data as ChunkData
+                    val matB = b ?: continue
+                    val resRows = Array(data.rows.size) { DoubleArray(matB[0].size) }
+
+                    for (i in data.rows.indices) {
+                        for (j in matB[0].indices) {
+                            var sum = 0.0
+                            for (k in matB.indices) {
+                                sum += data.rows[i][k] * matB[k][j]
+                            }
+                            resRows[i][j] = sum
+                        }
+                    }
+                    comm.send(0, TAG_RESULT, ChunkResult(data.startRow, resRows))
+                }
+                TAG_EXIT -> break
+            }
+        }
+    }
+
+    private fun calculateBlockRanges(totalRows: Int, parts: Int): Pair<IntArray, IntArray> {
+        val starts = IntArray(parts)
+        val counts = IntArray(parts)
+        val base = totalRows / parts
+        var rem = totalRows % parts
+        var cur = 0
+        for (i in 0 until parts) {
+            starts[i] = cur
+            counts[i] = base + if (rem > 0) 1 else 0
+            if (rem > 0) rem--
+            cur += counts[i]
+        }
+        return starts to counts
+    }
+
+    private fun copyChunkToResult(c: Array<DoubleArray>, res: ChunkResult) {
+        for (i in res.rows.indices) {
+            c[res.startRow + i] = res.rows[i]
+        }
+    }
+
+    private fun multiplySingleNode(a: Array<DoubleArray>, b: Array<DoubleArray>, c: Array<DoubleArray>, start: Int, end: Int) {
+        val size = a.size
+        for (i in start until end) {
+            for (j in 0 until size) {
+                var s = 0.0
+                for (k in 0 until size) s += a[i][k] * b[k][j]
+                c[i][j] = s
+            }
+        }
+    }
+
+    private fun verifyResult(a: Array<DoubleArray>, b: Array<DoubleArray>, c: Array<DoubleArray>, size: Int) {
+        print("[VERIFICATION] Checking mathematical correctness against A x B... ")
+        val checkRows = listOf(0, size / 2, size - 1)
+        for (row in checkRows) {
+            for (col in 0 until size) {
+                var expected = 0.0
+                for (k in 0 until size) expected += a[row][k] * b[k][col]
+                if (Math.abs(expected - c[row][col]) > 1e-4) {
+                    println("FAILED at row $row, col $col")
+                    return
+                }
+            }
+        }
+        println("SUCCESS! (100% matched)")
+    }
+
+    companion object {
+        private const val TAG_B = 10
+        private const val TAG_CHUNK_DATA = 20
+        private const val TAG_RESULT = 30
+        private const val TAG_EXIT = 99
+    }
+}
+
+data class ChunkData(val startRow: Int, val rows: Array<DoubleArray>) : Serializable
+data class ChunkResult(val startRow: Int, val rows: Array<DoubleArray>) : Serializable
+
+
+==================================================
+FILE: Network-File-Server-Lab\src\main\kotlin\sspoirs\lr8\MatrixMultGroups.kt
+==================================================
+package sspoirs.lr8
+
+import sspoirs.mpi.Mpi
+import sspoirs.mpi.MpiFile
+import sspoirs.mpi.Communicator
+import java.io.File
+import java.nio.ByteBuffer
+import kotlin.random.Random
+
+class MatrixMultGroups {
+
+    fun run(args: List<String>) {
+        val numGroups = args.find { it.startsWith("groups=") }?.substringAfter("=")?.toIntOrNull() ?: 1
+        val size = args.find { it.startsWith("size=") }?.substringAfter("=")?.toIntOrNull() ?: 600
+        val fileA = args.find { it.startsWith("fileA=") }?.substringAfter("=") ?: "matrixA.bin"
+        val fileB = args.find { it.startsWith("fileB=") }?.substringAfter("=") ?: "matrixB.bin"
+
+        val world = Mpi.COMM_WORLD
+
+        // Создаем матрицы на КАЖДОМ узле, если их нет
+        if (!File(fileA).exists() || !File(fileB).exists()) {
+            println("[LR8 Rank ${world.rank}] Auto-generating $size x $size binary matrices...")
+            createMatrixBinary(fileA, size)
+            createMatrixBinary(fileB, size)
+        }
+        world.barrier()
+
+        val assignments = IntArray(world.size)
+        val actualGroups = minOf(numGroups, world.size)
+        for (i in 0 until actualGroups) {
+            assignments[i] = i
+        }
+        val rng = Random(42)
+        for (i in actualGroups until world.size) {
+            assignments[i] = rng.nextInt(actualGroups)
+        }
+
+        val myGroupId = assignments[world.rank]
+        val groupRanks = assignments.withIndex().filter { it.value == myGroupId }.map { it.index }
+        val groupComm = world.createGroup(groupRanks) ?: return
+
+        println("[LR8] World Rank ${world.rank} -> Group $myGroupId (Local Rank ${groupComm.rank} of ${groupComm.size})")
+
+        executeGroupMultiplication(myGroupId, groupComm, size, fileA, fileB)
+    }
+
+    private fun executeGroupMultiplication(groupId: Int, comm: Communicator, size: Int, pathA: String, pathB: String) {
+        val startTime = System.currentTimeMillis()
+        val fileA = MpiFile(pathA, "r")
+        val fileB = MpiFile(pathB, "r")
+
+        val rowsPerRank = size / comm.size
+        val myStartRow = comm.rank * rowsPerRank
+        val myRowsCount = if (comm.rank == comm.size - 1) size - myStartRow else rowsPerRank
+
+        val rowBytes = size * 8L
+        val readBuffer = ByteArray(size * 8)
+        val myA = Array(myRowsCount) { DoubleArray(size) }
+
+        for (i in 0 until myRowsCount) {
+            val offset = (myStartRow + i) * rowBytes
+            fileA.readAt(offset, readBuffer)
+            ByteBuffer.wrap(readBuffer).asDoubleBuffer().get(myA[i])
+        }
+
+        val fullB = if (comm.rank == 0) {
+            val matrixB = Array(size) { DoubleArray(size) }
+            for (i in 0 until size) {
+                fileB.readAt(i * rowBytes, readBuffer)
+                ByteBuffer.wrap(readBuffer).asDoubleBuffer().get(matrixB[i])
+            }
+            comm.bcast(matrixB, 0) as Array<DoubleArray>
+        } else {
+            comm.bcast("", 0) as Array<DoubleArray>
+        }
+
+        val myC = Array(myRowsCount) { DoubleArray(size) }
+        for (i in 0 until myRowsCount) {
+            for (j in 0 until size) {
+                var sum = 0.0
+                for (k in 0 until size) sum += myA[i][k] * fullB[k][j]
+                myC[i][j] = sum
+            }
+        }
+
+        val outPath = "result_group_$groupId.bin"
+        val groupOutFile = MpiFile(outPath, "rw")
+        val writeBuf = ByteBuffer.allocate(size * 8)
+
+        for (i in 0 until myRowsCount) {
+            writeBuf.clear()
+            myC[i].forEach { writeBuf.putDouble(it) }
+            val offset = (myStartRow + i) * rowBytes
+            groupOutFile.writeAt(offset, writeBuf.array())
+        }
+
+        var localChecksum = 0.0
+        myC.forEach { row -> row.forEach { localChecksum += it } }
+        val totalChecksum = comm.reduce(localChecksum, 0)
+
+        val duration = System.currentTimeMillis() - startTime
+        println("[LR8 Group $groupId] Rank ${comm.rank} finished in ${duration}ms")
+
+        if (comm.rank == 0) {
+            println("[LR8 Group $groupId] Total Checksum: ${String.format("%.4f", totalChecksum)} -> Saved to $outPath")
+        }
+
+        fileA.close()
+        fileB.close()
+        groupOutFile.close()
+    }
+
+    private fun createMatrixBinary(path: String, size: Int) {
+        val file = MpiFile(path, "rw")
+        val buf = ByteBuffer.allocate(size * 8)
+        for (i in 0 until size) {
+            buf.clear()
+            repeat(size) { buf.putDouble(Random(i.toLong()).nextDouble(1.0, 10.0)) }
+            file.writeAt(i * size * 8L, buf.array())
+        }
+        file.close()
+    }
+}
+
+
+==================================================
+FILE: Network-File-Server-Lab\src\main\kotlin\sspoirs\mpi\Communicator.kt
+==================================================
+package sspoirs.mpi
+
+import java.io.*
+import java.net.Socket
+import java.net.SocketTimeoutException
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+
+class Communicator(
+    val rank: Int,
+    val hosts: List<String>,
+    private val connections: Map<Int, Socket>,
+    private val parentComm: Communicator? = null,
+    private val groupGlobalRanks: List<Int>? = null
+) {
+    val size: Int = hosts.size
+    private val allMessages = CopyOnWriteArrayList<MpiMessage>()
+    private val streams = ConcurrentHashMap<Int, Pair<ObjectOutputStream, ObjectInputStream>>()
+    private val outputLocks = ConcurrentHashMap<Int, Any>() // Unique lock for each destination
+    private val isClosed = AtomicBoolean(false)
+    private val receiveThreads = mutableListOf<Thread>()
+
+    companion object {
+        const val ANY_SOURCE = -1
+        const val ANY_TAG = -1
+        const val SOCKET_TIMEOUT_MS = 30000L
+    }
+
+    init {
+        if (parentComm == null) {
+            connections.forEach { (r, socket) ->
+                try {
+                    // Setup timeouts and performance flags
+                    socket.soTimeout = SOCKET_TIMEOUT_MS.toInt()
+                    socket.tcpNoDelay = true
+                    socket.keepAlive = true
+                    
+                    val out = ObjectOutputStream(socket.getOutputStream())
+                    out.flush()
+                    val inp = ObjectInputStream(socket.getInputStream())
+                    streams[r] = out to inp
+                    outputLocks[r] = Any()
+                    
+                    val thread = Thread({ receiveLoop(r, inp) }, "MpiReceiver-$r")
+                    thread.isDaemon = true
+                    thread.start()
+                    receiveThreads.add(thread)
+                } catch (e: Exception) {
+                    println("[MPI] Error initializing connection to Rank $r: ${e.message}")
+                }
+            }
+        }
+    }
+
+    private fun receiveLoop(fromRank: Int, input: ObjectInputStream) {
+        try {
+            while (!isClosed.get()) {
+                try {
+                    val msg = input.readObject() as? MpiMessage ?: break
+                    synchronized(allMessages) {
+                        allMessages.add(msg)
+                        (allMessages as Object).notifyAll()
+                    }
+                } catch (e: EOFException) {
+                    break
+                } catch (e: SocketTimeoutException) {
+                    if (isClosed.get()) break
+                    continue
+                } catch (e: Exception) {
+                    if (!isClosed.get()) {
+                        println("[MPI] Error receiving from $fromRank: ${e.message}")
+                    }
+                    break
+                }
+            }
+        } catch (e: Exception) {
+            // Ignore during shutdown
+        } finally {
+            if (!isClosed.get()) {
+                // Potential connection loss
+            }
+        }
+    }
+
+    /**
+     * Safe send with per-destination locking and optimized reset.
+     */
+    fun send(dest: Int, tag: Int, data: Any) {
+        if (parentComm != null && groupGlobalRanks != null) {
+            val globalDest = groupGlobalRanks[dest]
+            parentComm.send(globalDest, tag, data)
+            return
+        }
+
+        if (isClosed.get()) {
+            throw IllegalStateException("Communicator is closed")
+        }
+        
+        if (dest == rank) {
+            synchronized(allMessages) {
+                allMessages.add(MpiMessage(rank, tag, data))
+                (allMessages as Object).notifyAll()
+            }
+            return
+        }
+        
+        val pair = streams[dest] ?: throw IllegalArgumentException("No connection to rank $dest")
+        val out = pair.first
+        val lock = outputLocks[dest] ?: throw IllegalStateException("No lock for rank $dest")
+        
+        synchronized(lock) {
+            try {
+                out.writeObject(MpiMessage(rank, tag, data))
+                out.flush()
+                
+                // Optimized reset: don't reset for very large objects (like matrices)
+                // as it might be expensive, but reset for small ones to prevent memory leaks
+                if (data !is Array<*> || data.size <= 1000) {
+                    out.reset()
+                }
+            } catch (e: IOException) {
+                isClosed.set(true)
+                throw RuntimeException("Failed to send to rank $dest: ${e.message}", e)
+            }
+        }
+    }
+
+
+    fun recv(source: Int = ANY_SOURCE, tag: Int = ANY_TAG): Any {
+        return recvMessage(source, tag).data
+    }
+
+    fun recvMessage(source: Int = ANY_SOURCE, tag: Int = ANY_TAG): MpiMessage {
+        if (parentComm != null && groupGlobalRanks != null) {
+            val globalSource = if (source == ANY_SOURCE) -1 else groupGlobalRanks[source]
+            val targetLock = parentComm.allMessages
+            synchronized(targetLock) {
+                while (true) {
+                    if (parentComm.isClosed.get()) {
+                        throw IllegalStateException("Parent communicator is closed")
+                    }
+                    val msg = parentComm.allMessages.find {
+                        val sourceMatches = if (globalSource == -1) groupGlobalRanks.contains(it.source) else it.source == globalSource
+                        sourceMatches && (tag == ANY_TAG || it.tag == tag)
+                    }
+                    if (msg != null) {
+                        parentComm.allMessages.remove(msg)
+                        val subSource = groupGlobalRanks.indexOf(msg.source)
+                        return MpiMessage(subSource, msg.tag, msg.data)
+                    }
+                    try {
+                        (targetLock as Object).wait(1000)
+                    } catch (e: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        throw RuntimeException("Interrupted while waiting for message", e)
+                    }
+                }
+            }
+        }
+
+        synchronized(allMessages) {
+            while (true) {
+                if (isClosed.get()) {
+                    throw IllegalStateException("Communicator is closed")
+                }
+                
+                val msg = allMessages.find { 
+                    (source == ANY_SOURCE || it.source == source) && 
+                    (tag == ANY_TAG || it.tag == tag) 
+                }
+                if (msg != null) {
+                    allMessages.remove(msg)
+                    return msg
+                }
+                try {
+                    (allMessages as Object).wait(1000)
+                } catch (e: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    throw RuntimeException("Interrupted while waiting for message", e)
+                }
+            }
+        }
+    }
+
+    fun isend(dest: Int, tag: Int, data: Any): MpiRequest {
+        val req = MpiRequest()
+        Thread {
+            try {
+                send(dest, tag, data)
+                req.complete()
+            } catch (e: Exception) {
+                req.completeWithError(e)
+            }
+        }.start()
+        return req
+    }
+
+    fun irecv(source: Int, tag: Int): MpiRequest {
+        val req = MpiRequest()
+        Thread {
+            try {
+                val data = recv(source, tag)
+                req.complete(data)
+            } catch (e: Exception) {
+                req.completeWithError(e)
+            }
+        }.start()
+        return req
+    }
+
+    fun barrier() {
+        if (size == 1) return
+        if (rank == 0) {
+            for (i in 1 until size) recv(i, 999)
+            for (i in 1 until size) send(i, 999, "GO")
+        } else {
+            send(0, 999, "READY")
+            recv(0, 999)
+        }
+    }
+
+    fun close() {
+        if (isClosed.getAndSet(true)) return
+        
+        receiveThreads.forEach { it.interrupt() }
+        
+        connections.values.forEach { 
+            try { it.close() } catch (e: Exception) { /* ignore */ }
+        }
+        streams.clear()
+    }
+
+    // --- Collective Operations (Lab 8) ---
+
+    fun bcast(data: Any, root: Int): Any {
+        if (rank == root) {
+            for (i in 0 until size) {
+                if (i != rank) send(i, 888, data)
+            }
+            return data
+        } else {
+            return recv(root, 888)
+        }
+    }
+
+    fun gather(data: Any, root: Int): List<Any>? {
+        if (rank == root) {
+            val results = mutableListOf<Any>()
+            for (i in 0 until size) {
+                if (i == rank) results.add(data)
+                else results.add(recv(i, 889))
+            }
+            return results
+        } else {
+            send(root, 889, data)
+            return null
+        }
+    }
+
+    fun reduce(data: Double, root: Int): Double {
+        if (rank == root) {
+            var sum = data
+            for (i in 0 until size) {
+                if (i != rank) sum += recv(i, 890) as Double
+            }
+            return sum
+        } else {
+            send(root, 890, data)
+            return 0.0
+        }
+    }
+
+    fun createGroup(ranks: List<Int>): Communicator? {
+        if (!ranks.contains(this.rank)) return null
+        
+        val newRank = ranks.indexOf(this.rank)
+        val newHosts = ranks.map { this.hosts[it] }
+        
+        return Communicator(newRank, newHosts, mapOf(), parentComm = this, groupGlobalRanks = ranks)
+    }
+
+    private data class MatrixMeta(val rows: Int, val cols: Int) : Serializable {
+        companion object {
+            private const val serialVersionUID = 1L
+        }
+    }
+}
+
+data class MpiMessage(val source: Int, val tag: Int, val data: Any) : Serializable {
+    companion object {
+        private const val serialVersionUID = 1L
+    }
+}
+
+class MpiRequest {
+    private val latch = CountDownLatch(1)
+    private var data: Any? = null
+    private var error: Throwable? = null
+
+    fun complete(result: Any? = null) {
+        data = result
+        latch.countDown()
+    }
+    
+    fun completeWithError(e: Throwable) {
+        error = e
+        latch.countDown()
+    }
+
+    fun wait(): Any? {
+        latch.await()
+        if (error != null) throw RuntimeException(error)
+        return data
+    }
+    
+    fun wait(timeout: Long, unit: TimeUnit): Any? {
+        if (!latch.await(timeout, unit)) {
+            throw RuntimeException("Request timeout")
+        }
+        if (error != null) throw RuntimeException(error)
+        return data
+    }
+    
+    fun isCompleted() = latch.count == 0L
+}
+
+
+
+==================================================
+FILE: Network-File-Server-Lab\src\main\kotlin\sspoirs\mpi\Mpi.kt
+==================================================
+package sspoirs.mpi
+
+import java.io.File
+import java.net.InetSocketAddress
+import java.net.ServerSocket
+import java.net.Socket
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+
+object Mpi {
+    private var isInitialized = false
+    private var worldComm: Communicator? = null
+
+    val COMM_WORLD: Communicator
+        get() = worldComm ?: throw IllegalStateException("MPI not initialized. Call Mpi.init() first.")
+
+    fun init(args: List<String>) {
+        if (isInitialized) return
+
+        val rank = args.find { it.startsWith("rank=") }?.substringAfter("=")?.toIntOrNull()
+            ?: args.getOrNull(0)?.toIntOrNull()
+            ?: throw IllegalArgumentException("MPI Init: 'rank' argument missing. Use rank=N or pass number.")
+
+        // Если hosts не передан через аргументы, читаем из файла hosts.txt!
+        val hosts = args.find { it.startsWith("hosts=") }?.substringAfter("=")?.split(",")
+            ?: loadHostsFromFile()
+
+        println("==================================================")
+        println("[MPI] Initializing Rank $rank of ${hosts.size} nodes: $hosts")
+        println("==================================================")
+
+        val connections = establishConnections(rank, hosts)
+        worldComm = Communicator(rank, hosts, connections)
+        isInitialized = true
+
+        println("[MPI Rank $rank] Synchronizing at barrier...")
+        worldComm?.barrier()
+        println("[MPI Rank $rank] >>> READY TO COMPUTE! <<<")
+    }
+
+    private fun loadHostsFromFile(): List<String> {
+        val file = File("hosts.txt")
+        if (file.exists()) {
+            val lines = file.readLines().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }
+            if (lines.isNotEmpty()) return lines
+        }
+        return listOf("127.0.0.1", "127.0.0.1")
+    }
+
+    private fun establishConnections(myRank: Int, hosts: List<String>): Map<Int, Socket> {
+        val connections = ConcurrentHashMap<Int, Socket>()
+        val basePort = 10000
+        val latch = CountDownLatch(hosts.size - 1)
+
+        val listener = ServerSocket()
+        listener.reuseAddress = true
+        listener.bind(InetSocketAddress(basePort + myRank))
+        listener.soTimeout = 60000 // 60 секунд на ожидание подключения
+
+        println("[MPI Rank $myRank] Server listening on port ${basePort + myRank}...")
+
+        val executor = Executors.newFixedThreadPool(hosts.size)
+
+        // 1. Подключаемся к узлам с меньшим рангом
+        for (i in 0 until myRank) {
+            val targetRank = i
+            val targetHost = hosts[targetRank]
+            val targetPort = basePort + targetRank
+            executor.submit {
+                var connected = false
+                var attempts = 0
+                while (!connected && attempts < 60) {
+                    try {
+                        val socket = Socket()
+                        socket.tcpNoDelay = true
+                        socket.soTimeout = Communicator.SOCKET_TIMEOUT_MS.toInt()
+                        socket.connect(InetSocketAddress(targetHost, targetPort), 2000)
+
+                        socket.getOutputStream().write(myRank)
+                        socket.getOutputStream().flush()
+
+                        connections[targetRank] = socket
+                        connected = true
+                        println("[MPI Rank $myRank] -> CONNECTED to Rank $targetRank ($targetHost:$targetPort)!")
+                        latch.countDown()
+                    } catch (e: Exception) {
+                        attempts++
+                        if (attempts % 5 == 0) {
+                            println("[MPI Rank $myRank] Still trying to connect to Rank $targetRank ($targetHost:$targetPort): ${e.message}")
+                        }
+                        Thread.sleep(1000)
+                    }
+                }
+                if (!connected) {
+                    println("[MPI Rank $myRank] FAILED to connect to Rank $targetRank!")
+                }
+            }
+        }
+
+        // 2. Принимаем подключения от узлов с большим рангом
+        val acceptThread = Thread {
+            for (i in (myRank + 1) until hosts.size) {
+                try {
+                    println("[MPI Rank $myRank] Waiting for Rank $i to connect...")
+                    val socket = listener.accept()
+                    socket.tcpNoDelay = true
+                    socket.soTimeout = Communicator.SOCKET_TIMEOUT_MS.toInt()
+
+                    val remoteRank = socket.getInputStream().read()
+                    if (remoteRank != -1) {
+                        connections[remoteRank] = socket
+                        println("[MPI Rank $myRank] -> ACCEPTED connection from Rank $remoteRank!")
+                        latch.countDown()
+                    }
+                } catch (e: Exception) {
+                    println("[MPI Rank $myRank] Accept error: ${e.message}")
+                }
+            }
+        }
+        acceptThread.start()
+
+        val success = latch.await(65, TimeUnit.SECONDS)
+        if (!success) {
+            println("[MPI Rank $myRank] TIMEOUT: Not all ranks connected in 60s! Active: ${connections.keys}")
+        }
+
+        executor.shutdown()
+        listener.close()
+        return connections
+    }
+
+    fun finalize() {
+        if (!isInitialized) return
+        worldComm?.close()
+        isInitialized = false
+        println("[MPI] Finalized.")
+    }
+}
+
+
+==================================================
+FILE: Network-File-Server-Lab\src\main\kotlin\sspoirs\Main.kt
+==================================================
+package sspoirs
+
+import sspoirs.common.Constants
+import sspoirs.lr1.SimpleClient
+import sspoirs.lr1.TcpCommandServer
+import sspoirs.lr2.UdpClient
+import sspoirs.lr2.UdpServer
+import sspoirs.lr4.TcpThreadPoolServer
+import sspoirs.lr5.IcmpService
+import sspoirs.lr6.NetworkDiscovery
+import sspoirs.lr6.P2PChat
+import sspoirs.lr7.MatrixMult
+import sspoirs.lr8.MatrixMultGroups
+import sspoirs.mpi.Mpi
+import java.io.RandomAccessFile
+import java.nio.ByteBuffer
+
+fun main(args: Array<String>) {
+    Constants.initDirs()
+
+    if (args.isEmpty()) {
+        printHelp()
+        return
+    }
+
+    val mode = args.getOrNull(0)
+    val protocolStr = args.getOrNull(1) ?: "1"
+    val protocol = if (protocolStr == "2") Constants.Protocol.UDP else Constants.Protocol.TCP
+    val port = args.getOrNull(2)?.toIntOrNull() ?: Constants.DEFAULT_PORT
+
+    println("=== Network File Server (SSPOiRS) ===")
+
+    when (mode) {
+        "1" -> startServer(protocol, port, isThreadPool = false)
+        "3" -> startServer(protocol, port, isThreadPool = true)
+        "2" -> startClient(protocol, port, args.getOrNull(3) ?: Constants.DEFAULT_HOST)
+        "5" -> handleLr5(args.drop(1))
+        "6" -> handleLr6(args.drop(1))
+        "7" -> handleLr7(args.drop(1))
+        "8" -> handleLr8(args.drop(1))
+        "mpirun" -> handleLocalMpiRun(args.drop(1))
+        "gen" -> generateMatrixFiles(args.drop(1))
+        "list-ifaces" -> {
+            println("Available interfaces:")
+            NetworkDiscovery.listInterfaces().forEachIndexed { idx, p ->
+                println("  $idx: ${p.interfaceName} - IP: ${p.ip}, Broadcast: ${p.broadcast}")
+            }
+        }
+        else -> printHelp()
+    }
+}
+
+private fun printHelp() {
+    println("""
+        Usage: run.bat <mode> [args...]
+        MODES:
+          1 <proto> [port]            = Sequential Server (Lab 1/3)
+          2 <proto> [port] [host]     = Client (Lab 1/2)
+          3 <proto> [port]            = Thread Pool Server (Lab 4)
+          5 <submode> [args...]       = ICMP Utils (Lab 5: ping, trace, raw)
+          6 [manual_ip]               = P2P Chat (Lab 6)
+          7 rank=N hosts=h1,h2...     = MPI Matrix Mult (Lab 7)
+          8 rank=N hosts=h1,h2...     = MPI Groups & IO (Lab 8)
+          mpirun <np> <mode 7|8> [...] = Auto-launch N local processes for MPI
+          gen size=N                  = Generate binary matrix files
+          list-ifaces                 = List available network interfaces
+    """.trimIndent())
+}
+
+private fun handleLocalMpiRun(args: List<String>) {
+    val np = args.getOrNull(0)?.toIntOrNull() ?: 3
+    val targetMode = args.getOrNull(1) ?: "7"
+    val restArgs = args.drop(2)
+
+    val hosts = (0 until np).joinToString(",") { "127.0.0.1" }
+    val javaBin = System.getProperty("java.home") + "/bin/java"
+    val classpath = System.getProperty("java.class.path")
+
+    println("=== [MPIRUN] Launching $np local processes on 127.0.0.1 for Lab $targetMode ===")
+
+    val processes = mutableListOf<Process>()
+    for (rank in 0 until np) {
+        val cmd = mutableListOf(
+            javaBin, "-cp", classpath, "sspoirs.MainKt",
+            targetMode, "rank=$rank", "hosts=$hosts"
+        )
+        cmd.addAll(restArgs)
+
+        val pb = ProcessBuilder(cmd)
+        pb.redirectErrorStream(true)
+        val proc = pb.start()
+        processes.add(proc)
+
+        Thread {
+            proc.inputStream.bufferedReader().useLines { lines ->
+                lines.forEach { line -> println("[Proc-$rank] $line") }
+            }
+        }.start()
+    }
+
+    processes.forEach { it.waitFor() }
+    println("=== [MPIRUN] All processes finished. ===")
+}
+
+private fun handleLr7(args: List<String>) {
+    Mpi.init(args)
+    MatrixMult().run(args)
+    Mpi.finalize()
+}
+
+private fun handleLr8(args: List<String>) {
+    Mpi.init(args)
+    MatrixMultGroups().run(args)
+    Mpi.finalize()
+}
+
+private fun generateMatrixFiles(args: List<String>) {
+    val size = args.find { it.startsWith("size=") }?.substringAfter("=")?.toIntOrNull() ?: 600
+    println("Generating $size x $size matrix files (matrixA.bin, matrixB.bin)...")
+
+    fun writeMat(path: String) {
+        val file = RandomAccessFile(path, "rw")
+        val buffer = ByteBuffer.allocate(size * 8)
+        for (i in 0 until size) {
+            buffer.clear()
+            repeat(size) { buffer.putDouble(Math.random()) }
+            file.write(buffer.array())
+        }
+        file.close()
+    }
+
+    writeMat("matrixA.bin")
+    writeMat("matrixB.bin")
+    println("Done.")
+}
+
+private fun handleLr5(args: List<String>) {
+    val submode = args.getOrNull(0)
+    if (submode == null) {
+        println("LR5 Submodes: ping, trace, raw")
+        return
+    }
+
+    try {
+        val icmp = IcmpService()
+        when (submode) {
+            "ping" -> icmp.parallelPing(args.drop(1))
+            "trace" -> icmp.traceroute(args.getOrNull(1) ?: "8.8.8.8")
+            "raw", "smurf" -> {
+                val src = args.getOrNull(1)?.replace("\uFEFF", "")?.trim() ?: return println("Source IP required")
+                val dst = args.getOrNull(2)?.replace("\uFEFF", "")?.trim() ?: return println("Destination IP required")
+                val count = args.getOrNull(3)?.toIntOrNull() ?: 10
+                icmp.sendRawIpPacket(src, dst, count)
+            }
+            else -> println("Unknown submode: $submode")
+        }
+        icmp.close()
+    } catch (e: Exception) {
+        println("[ERROR] ICMP Service: ${e.message}")
+    }
+}
+
+private fun startServer(protocol: Constants.Protocol, port: Int, isThreadPool: Boolean) {
+    try {
+        if (isThreadPool) {
+            TcpThreadPoolServer(port).start()
+        } else {
+            if (protocol == Constants.Protocol.TCP) TcpCommandServer(port).start()
+            else UdpServer(port).start()
+        }
+    } catch (e: Exception) {
+        println("[ERROR] Server failed: ${e.message}")
+    }
+}
+
+private fun startClient(protocol: Constants.Protocol, port: Int, host: String) {
+    try {
+        if (protocol == Constants.Protocol.TCP) {
+            SimpleClient(host, port).start()
+        } else {
+            UdpClient(host, port).start()
+        }
+    } catch (e: Exception) {
+        println("[ERROR] Client failed: ${e.message}")
+    }
+}
+
+private fun handleLr6(args: List<String>) {
+    var params = NetworkDiscovery.discover(args.getOrNull(0))
+
+    if (params == null || params.broadcast == "N/A" || params.broadcast == "0.0.0.0") {
+        println("Auto-discovery failed or found virtual interface.")
+        println("Available interfaces:")
+        val list = NetworkDiscovery.listInterfaces()
+        list.forEachIndexed { idx, p ->
+            println("  $idx: ${p.interfaceName} - IP: ${p.ip}, Broadcast: ${p.broadcast}")
+        }
+        print("Enter interface number (or IP manually): ")
+
+        val input = readLine()?.trim() ?: return
+        val selected = input.toIntOrNull()
+        if (selected != null && selected in list.indices) {
+            params = list[selected]
+        } else {
+            params = NetworkDiscovery.discover(input)
+        }
+
+        if (params == null) {
+            println("Could not determine network parameters. Exiting.")
+            return
+        }
+    }
+
+    println("Network: IP=${params.ip}, Mask=${params.mask}, Broadcast=${params.broadcast} (${params.interfaceName})")
+
+    val chat = P2PChat(params)
+    println("P2P Chat Started. Commands: /mode <b|m>, /list, /ignore <ip>, /leave, /exit")
+
+    while (true) {
+        print("> ")
+        val rawLine = readLine() ?: break
+        val line = rawLine.trim()
+        if (line.isEmpty()) continue
+        if (line.equals("/exit", ignoreCase = true) || line.equals("exit", ignoreCase = true)) break
+
+        if (line.startsWith("/")) {
+            processChatCommand(line, chat)
+        } else {
+            chat.sendMessage(line)
+        }
+    }
+    chat.close()
+}
+
+private fun processChatCommand(line: String, chat: P2PChat) {
+    val parts = line.split(" ")
+    when (parts[0].lowercase()) {
+        "/mode" -> {
+            chat.mode = if (parts.getOrNull(1)?.lowercase() == "m") P2PChat.ChatMode.MULTICAST else P2PChat.ChatMode.BROADCAST
+            println("Mode changed to ${chat.mode}")
+        }
+        "/list" -> {
+            println("Active Peers:")
+            if (chat.peers.isEmpty()) {
+                println("  (No peers discovered yet)")
+            } else {
+                chat.peers.forEach { (id, peer) -> println(" - IP: ${peer.ip}, ID: $id") }
+            }
+        }
+        "/ignore" -> {
+            val target = parts.getOrNull(1)
+            if (target != null) {
+                chat.ignoredPeers.add(target)
+                println("Ignoring messages from $target")
+            } else {
+                println("Usage: /ignore <ip_or_id>")
+            }
+        }
+        "/leave" -> chat.leaveMulticast()
+        else -> println("Unknown command: ${parts[0]}")
+    }
+}
+
+
+
+==================================================
+FILE: Network-File-Server-Lab\Test-LR6-Net.ps1
+==================================================
+cmd.exe /c run.bat 6 10.220.155.14
+
+
+==================================================
+FILE: Network-File-Server-Lab\test_lr6_net.sh
+==================================================
+#!/bin/bash
+./run.sh 6 10.220.155.244
+
+
+==================================================
+FILE: Network-File-Server-Lab\hosts.txt
+==================================================
+10.245.30.14
+10.245.30.118
+
+
+
