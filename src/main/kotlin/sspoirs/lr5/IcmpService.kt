@@ -20,7 +20,6 @@ class IcmpService : AutoCloseable {
             val err = net.getLastError()
             throw RuntimeException("Failed to create raw socket. Error code: $err. Must run as Admin/Root.")
         }
-        // Жесткий таймаут 800 мс на чтение, чтобы Windows НИКОГДА не зависала
         setSocketTimeout(800)
     }
 
